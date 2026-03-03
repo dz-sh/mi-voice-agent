@@ -1,0 +1,40 @@
+{
+  "name": "@mi-voice-agent/voice-gateway",
+  "author": "Austin Zhang",
+  "version": "0.1.0",
+  "description": "Voice gateway: XiaoAI speaker as voice frontend for MCP-powered AI agents",
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "bin": {
+    "mi-voice-gateway": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@mi-gpt/miot": "^1.2.2",
+    "@mi-gpt/next": "^1.3.2",
+    "@mi-gpt/utils": "^1.1.1",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dotenv": "^17.3.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

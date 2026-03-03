@@ -1,0 +1,38 @@
+{
+  "name": "@mi-voice-agent/mcp-server",
+  "author": "Austin Zhang",
+  "version": "0.1.0",
+  "description": "MCP Server for Xiaomi Smart Home (MIoT/MiNA) control",
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "bin": {
+    "mihome-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@mi-gpt/miot": "^1.2.2",
+    "@mi-gpt/utils": "^1.1.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

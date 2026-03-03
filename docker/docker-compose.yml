@@ -1,0 +1,26 @@
+services:
+  # ─── Voice Gateway (primary) ────────────────────────────────
+  # Connects XiaoAi speaker to OpenClaw as a voice channel.
+  voice-gateway:
+    image: ghcr.io/dz-sh/mi-voice-agent:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    container_name: mi-voice-gateway
+    restart: unless-stopped
+    environment:
+      - MI_USER=${MI_USER}
+      - MI_PASS=${MI_PASS}
+      - MI_DID=${MI_DID}
+      - MI_DEBUG=${MI_DEBUG:-false}
+      - MI_TIMEOUT=${MI_TIMEOUT:-5000}
+      - MI_HEARTBEAT=${MI_HEARTBEAT:-}
+      - CALL_AI_KEYWORDS=${CALL_AI_KEYWORDS:-}
+      - OPENCLAW_URL=${OPENCLAW_URL}
+      - OPENCLAW_TOKEN=${OPENCLAW_TOKEN:-}
+      - OPENCLAW_MODEL=${OPENCLAW_MODEL:-}
+      - STREAM_RESPONSE=${STREAM_RESPONSE:-true}
+      - MCP_PORT=${MCP_PORT:-3001}
+    ports:
+      - "${MCP_PORT:-3001}:${MCP_PORT:-3001}"
+
