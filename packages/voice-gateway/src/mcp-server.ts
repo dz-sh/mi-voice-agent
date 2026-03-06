@@ -139,6 +139,18 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA): void {
         },
     );
 
+    // ── Speaker Tools ──
+
+    server.tool(
+        'speaker_tts',
+        'Play TTS text through XiaoAi speaker immediately, interrupting any current playback.',
+        { text: z.string().describe('Text content to speak') },
+        async (args) => {
+            const success = await mina.play({ text: args.text });
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success, text: args.text }) }] };
+        },
+    );
+
     // ── Scene Tools ──
 
     const ActionStep = z.object({

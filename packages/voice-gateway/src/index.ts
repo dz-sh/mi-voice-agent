@@ -68,8 +68,6 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
       // If OpenClaw is configured, forward to agent
       if (openclawUrl) {
         try {
-          await engine.speaker.abortXiaoAI();
-
           const reply = useStreaming
             ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, msg.text, engine)
             : await callOpenClaw(openclawUrl, openclawToken, openclawModel, msg.text);
@@ -77,14 +75,14 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
             if (!useStreaming) {
-              await engine.speaker.play({ text: reply, blocking: true });
+              await engine.speaker.play({ text: reply });
             }
           }
 
           return { handled: true };
         } catch (err) {
           console.error('❌ OpenClaw request failed:', err);
-          await engine.speaker.play({ text: 'Service error, please try again later', blocking: true });
+          await engine.speaker.play({ text: 'Service error, please try again later' });
           return { handled: true };
         }
       }
@@ -96,14 +94,26 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     },
   };
 
-  // Start MiGPT (voice channel) — this logs in to Xiaomi Cloud
-  await MiGPT.start(enhancedConfig);
+  // Start MiGPT (voice channel) — runs forever in a polling loop, do not await
+  MiGPT.start(enhancedConfig).catch((err) => {
+    console.error('❌ MiGPT crashed:', err);
+    process.exit(1);
+  });
+
+  // Wait for MiService.init() to complete inside MiGPT.start()
+  const SESSION_TIMEOUT = 30_000;
+  const POLL_INTERVAL = 200;
+  const startTime = Date.now();
+  while (!MiGPT.MiOT || !MiGPT.MiNA) {
+    if (Date.now() - startTime > SESSION_TIMEOUT) {
+      throw new Error('MiGPT session init timeout after 30s');
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+  }
 
   // Start embedded MCP server using the same MIoT/MiNA session
   try {
-    const miot = MiGPT.MiOT;
-    const mina = MiGPT.MiNA;
-    await startEmbeddedMcpServer(mcpPort, miot, mina);
+    await startEmbeddedMcpServer(mcpPort, MiGPT.MiOT, MiGPT.MiNA);
     console.log('✅ Voice Gateway + MCP Server running (single MIoT session)');
   } catch (err) {
     console.error('⚠️ Failed to start embedded MCP server:', err);
@@ -219,14 +229,14 @@ async function callOpenClawStreaming(
         fullText = fullText.slice(sentenceEnd);
 
         if (sentence) {
-          await engine.speaker.play({ text: sentence, blocking: true });
+          await engine.speaker.play({ text: sentence });
         }
       }
     }
 
     const remaining = fullText.trim();
     if (remaining) {
-      await engine.speaker.play({ text: remaining, blocking: true });
+      await engine.speaker.play({ text: remaining });
     }
 
     return undefined;
