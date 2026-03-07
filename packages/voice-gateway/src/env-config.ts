@@ -10,6 +10,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
     const {
         MI_USER,
         MI_PASS,
+        MI_PASS_TOKEN,
         MI_DID,
         MI_DEBUG,
         MI_TIMEOUT,
@@ -23,9 +24,9 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
     } = process.env;
 
     // Validate required fields
-    if (!MI_USER || !MI_PASS || !MI_DID) {
+    if (!MI_USER || (!MI_PASS && !MI_PASS_TOKEN) || !MI_DID) {
         console.error('❌ Error: Missing required environment variables.');
-        console.error('   Please set MI_USER, MI_PASS, and MI_DID in your .env file.');
+        console.error('   Please set MI_USER, MI_DID, and either MI_PASS or MI_PASS_TOKEN in your .env file.');
         console.error('   See .env.example for details.');
         process.exit(1);
     }
@@ -37,6 +38,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         speaker: {
             userId: MI_USER,
             password: MI_PASS,
+            passToken: MI_PASS_TOKEN,
             did: MI_DID,
             debug,
             timeout: parseInt(MI_TIMEOUT || '5000', 10),

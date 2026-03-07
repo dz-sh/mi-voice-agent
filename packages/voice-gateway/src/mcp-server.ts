@@ -35,7 +35,24 @@ export async function startEmbeddedMcpServer(
         const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
         if (url.pathname === '/mcp') {
-            await transport.handleRequest(req, res);
+            let body: unknown;
+            if (req.method === 'POST') {
+                const chunks: Buffer[] = [];
+                for await (const chunk of req) chunks.push(chunk as Buffer);
+                const raw = Buffer.concat(chunks).toString('utf-8');
+                if (raw) {
+                    try { body = JSON.parse(raw); } catch { /* leave undefined */ }
+                }
+            }
+            try {
+                await transport.handleRequest(req, res, body);
+            } catch (err) {
+                console.error('❌ MCP transport error:', err);
+                if (!res.headersSent) {
+                    res.writeHead(500, { 'Content-Type': 'text/plain' });
+                    res.end(String(err));
+                }
+            }
         } else if (url.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ status: 'ok', service: 'mihome-mcp' }));

@@ -229,6 +229,7 @@ async function callOpenClawStreaming(
         fullText = fullText.slice(sentenceEnd);
 
         if (sentence) {
+          console.log(`🔊 TTS: ${sentence}`);
           await engine.speaker.play({ text: sentence });
         }
       }
