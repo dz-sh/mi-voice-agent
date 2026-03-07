@@ -17,24 +17,26 @@ export async function startEmbeddedMcpServer(
     port: number,
     miot: MIoT,
     mina: MiNA,
+    ttsCommand?: [number, number],
 ): Promise<void> {
     const mcpServer = new McpServer({
         name: 'mihome-mcp',
         version: '0.1.0',
     });
 
-    registerTools(mcpServer, miot, mina);
-
-    const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless
-    });
-
-    await mcpServer.connect(transport);
+    registerTools(mcpServer, miot, mina, ttsCommand);
 
     const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
         if (url.pathname === '/mcp') {
+            // Stateless mode requires a fresh transport per request to avoid
+            // message ID collisions. See MCP SDK WebStandardStreamableHTTP docs.
+            const transport = new StreamableHTTPServerTransport({
+                sessionIdGenerator: undefined,
+            });
+            await mcpServer.connect(transport);
+
             let body: unknown;
             if (req.method === 'POST') {
                 const chunks: Buffer[] = [];
@@ -52,6 +54,8 @@ export async function startEmbeddedMcpServer(
                     res.writeHead(500, { 'Content-Type': 'text/plain' });
                     res.end(String(err));
                 }
+            } finally {
+                await transport.close();
             }
         } else if (url.pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -69,7 +73,7 @@ export async function startEmbeddedMcpServer(
 
 // ─── Tool Registration ──────────────────────────────────────
 
-function registerTools(server: McpServer, miot: MIoT, mina: MiNA): void {
+function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [number, number]): void {
     // ── Device Tools ──
 
     server.tool(
@@ -163,8 +167,40 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA): void {
         'Play TTS text through XiaoAi speaker immediately, interrupting any current playback.',
         { text: z.string().describe('Text content to speak') },
         async (args) => {
-            const success = await mina.play({ text: args.text });
+            const success = ttsCommand
+                ? await miot.doAction(ttsCommand[0], ttsCommand[1], args.text)
+                : await mina.play({ text: args.text });
             return { content: [{ type: 'text' as const, text: JSON.stringify({ success, text: args.text }) }] };
+        },
+    );
+
+    server.tool(
+        'speaker_play_url',
+        'Play audio from a URL through XiaoAi speaker.',
+        { url: z.string().describe('Audio URL to play') },
+        async (args) => {
+            const success = await mina.play({ url: args.url });
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success, url: args.url }) }] };
+        },
+    );
+
+    server.tool(
+        'speaker_get_status',
+        'Get XiaoAi speaker play status and volume.',
+        {},
+        async () => {
+            const status = await mina.getStatus();
+            return { content: [{ type: 'text' as const, text: JSON.stringify(status ?? null, null, 2) }] };
+        },
+    );
+
+    server.tool(
+        'speaker_set_volume',
+        'Set XiaoAi speaker volume (6-100).',
+        { volume: z.number().min(6).max(100).describe('Volume level 6-100') },
+        async (args) => {
+            const success = await mina.setVolume(args.volume);
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success, volume: args.volume }) }] };
         },
     );
 

@@ -38,6 +38,30 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
    * Default: 3001
    */
   mcpPort?: number;
+
+  /**
+   * MIoT TTS action command [siid, aiid] for the speaker model.
+   *
+   * Required for models where MiNA ubus text_to_speech doesn't work.
+   * See https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md
+   *
+   * Example for L05C: [5, 3]
+   */
+  ttsCommand?: [number, number];
+
+  /**
+   * Inactivity timeout in minutes before conversation history is reset.
+   *
+   * Default: 10
+   */
+  conversationTimeout?: number;
+
+  /**
+   * Maximum number of turns (user+assistant pairs) to keep in history.
+   *
+   * Default: 20
+   */
+  maxHistoryTurns?: number;
 }
 
 /**
@@ -55,10 +79,18 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const openclawModel = config.openclawModel ?? 'openclaw';
   const useStreaming = config.streamResponse ?? true;
   const mcpPort = config.mcpPort ?? 3001;
+  const ttsCommand = config.ttsCommand;
+  const conversationTimeoutMs = (config.conversationTimeout ?? 10) * 60 * 1000;
+  const maxHistoryTurns = config.maxHistoryTurns ?? 20;
 
   if (!openclawUrl) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
   }
+
+  // Conversation history shared across voice turns
+  type Message = { role: 'user' | 'assistant'; content: string };
+  const history: Message[] = [];
+  let lastMessageAt = 0;
 
   const originalOnMessage = (config as any).onMessage;
 
@@ -67,22 +99,40 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     async onMessage(engine: any, msg: any) {
       // If OpenClaw is configured, forward to agent
       if (openclawUrl) {
+        // Reset history after inactivity
+        if (Date.now() - lastMessageAt > conversationTimeoutMs) {
+          history.length = 0;
+          console.log('🔄 Conversation history reset (timeout)');
+        }
+        lastMessageAt = Date.now();
+
+        // Append current user turn
+        history.push({ role: 'user', content: msg.text });
+
+        // Trim to max turns (each turn = 2 messages)
+        while (history.length > maxHistoryTurns * 2) history.splice(0, 2);
+
         try {
           const reply = useStreaming
-            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, msg.text, engine)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, msg.text);
+            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, history, ttsCommand)
+            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, history);
 
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
+            history.push({ role: 'assistant', content: reply });
             if (!useStreaming) {
-              await engine.speaker.play({ text: reply });
+              await speakText(reply, ttsCommand);
             }
+          } else {
+            // Remove the user turn we added if no reply came back
+            history.pop();
           }
 
           return { handled: true };
         } catch (err) {
+          history.pop(); // Remove the user turn on error
           console.error('❌ OpenClaw request failed:', err);
-          await engine.speaker.play({ text: 'Service error, please try again later' });
+          await speakText('服务出错，请稍后再试', ttsCommand);
           return { handled: true };
         }
       }
@@ -113,12 +163,22 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
 
   // Start embedded MCP server using the same MIoT/MiNA session
   try {
-    await startEmbeddedMcpServer(mcpPort, MiGPT.MiOT, MiGPT.MiNA);
+    await startEmbeddedMcpServer(mcpPort, MiGPT.MiOT, MiGPT.MiNA, ttsCommand);
     console.log('✅ Voice Gateway + MCP Server running (single MIoT session)');
   } catch (err) {
     console.error('⚠️ Failed to start embedded MCP server:', err);
     console.log('   Voice channel is still active. MCP tools unavailable.');
   }
+}
+
+/**
+ * Speak text via MIoT doAction (if ttsCommand set) or MiNA play fallback.
+ */
+async function speakText(text: string, ttsCommand?: [number, number]): Promise<boolean> {
+  if (ttsCommand) {
+    return MiGPT.MiOT!.doAction(ttsCommand[0], ttsCommand[1], text);
+  }
+  return MiGPT.MiNA!.play({ text }) ?? false;
 }
 
 /**
@@ -128,7 +188,7 @@ async function callOpenClaw(
   url: string,
   token: string | undefined,
   model: string,
-  text: string,
+  messages: { role: string; content: string }[],
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) {
@@ -138,11 +198,7 @@ async function callOpenClaw(
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model,
-      stream: false,
-      messages: [{ role: 'user', content: text }],
-    }),
+    body: JSON.stringify({ model, stream: false, messages }),
   });
 
   if (!res.ok) {
@@ -157,13 +213,14 @@ async function callOpenClaw(
  * Call OpenClaw with streaming mode.
  *
  * Reads SSE chunks and plays each complete sentence via TTS as it arrives.
+ * Returns the full assistant reply for history tracking.
  */
 async function callOpenClawStreaming(
   url: string,
   token: string | undefined,
   model: string,
-  text: string,
-  engine: any,
+  messages: { role: string; content: string }[],
+  ttsCommand?: [number, number],
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) {
@@ -173,11 +230,7 @@ async function callOpenClawStreaming(
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [{ role: 'user', content: text }],
-    }),
+    body: JSON.stringify({ model, stream: true, messages }),
   });
 
   if (!res.ok) {
@@ -193,6 +246,7 @@ async function callOpenClawStreaming(
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let fullReply = '';
 
   const sentenceEndings = /[。？！；?!;\n]/;
 
@@ -230,17 +284,20 @@ async function callOpenClawStreaming(
 
         if (sentence) {
           console.log(`🔊 TTS: ${sentence}`);
-          await engine.speaker.play({ text: sentence });
+          const ok = await speakText(sentence, ttsCommand);
+          console.log(`🔊 TTS result: ${ok}`);
+          fullReply += sentence;
         }
       }
     }
 
     const remaining = fullText.trim();
     if (remaining) {
-      await engine.speaker.play({ text: remaining });
+      await speakText(remaining, ttsCommand);
+      fullReply += remaining;
     }
 
-    return undefined;
+    return fullReply || undefined;
   } finally {
     reader.releaseLock();
   }

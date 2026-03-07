@@ -21,6 +21,10 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         OPENCLAW_MODEL,
         STREAM_RESPONSE,
         MCP_PORT,
+        TTS_SIID,
+        TTS_AIID,
+        CONVERSATION_TIMEOUT,
+        MAX_HISTORY_TURNS,
     } = process.env;
 
     // Validate required fields
@@ -59,6 +63,15 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
 
     // MCP server port (default: 3001)
     config.mcpPort = parseInt(MCP_PORT || '3001', 10);
+
+    // MIoT TTS command for models where MiNA ubus TTS doesn't work
+    if (TTS_SIID && TTS_AIID) {
+        config.ttsCommand = [parseInt(TTS_SIID, 10), parseInt(TTS_AIID, 10)];
+    }
+
+    // Conversation history settings
+    if (CONVERSATION_TIMEOUT) config.conversationTimeout = parseInt(CONVERSATION_TIMEOUT, 10);
+    if (MAX_HISTORY_TURNS) config.maxHistoryTurns = parseInt(MAX_HISTORY_TURNS, 10);
 
     return config;
 }
