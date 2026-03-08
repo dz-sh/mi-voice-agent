@@ -23,8 +23,6 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         MCP_PORT,
         TTS_SIID,
         TTS_AIID,
-        CONVERSATION_TIMEOUT,
-        MAX_HISTORY_TURNS,
         THINKING_TEXT,
         USER_PROMPT,
     } = process.env;
@@ -70,10 +68,6 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
     if (TTS_SIID && TTS_AIID) {
         config.ttsCommand = [parseInt(TTS_SIID, 10), parseInt(TTS_AIID, 10)];
     }
-
-    // Conversation history settings
-    if (CONVERSATION_TIMEOUT) config.conversationTimeout = parseInt(CONVERSATION_TIMEOUT, 10);
-    if (MAX_HISTORY_TURNS) config.maxHistoryTurns = parseInt(MAX_HISTORY_TURNS, 10);
 
     // Placeholder text while OpenClaw is processing
     if (THINKING_TEXT) config.thinkingText = THINKING_TEXT;

@@ -50,20 +50,6 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
   ttsCommand?: [number, number];
 
   /**
-   * Inactivity timeout in minutes before conversation history is reset.
-   *
-   * Default: 10
-   */
-  conversationTimeout?: number;
-
-  /**
-   * Maximum number of turns (user+assistant pairs) to keep in history.
-   *
-   * Default: 20
-   */
-  maxHistoryTurns?: number;
-
-  /**
    * Placeholder text spoken immediately after cancelling XiaoAi's response,
    * while OpenClaw is processing the request.
    *
@@ -91,6 +77,10 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
  * 2. MCP server — device control tools via Streamable HTTP transport
  *
  * Both share a single MIoT session, eliminating dual-login conflicts.
+ *
+ * Conversation history is managed server-side by OpenClaw using the speaker
+ * device DID as the session identifier. The gateway does not maintain local
+ * history.
  */
 export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const openclawUrl = config.openclawUrl;
@@ -99,10 +89,10 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const useStreaming = config.streamResponse ?? true;
   const mcpPort = config.mcpPort ?? 3001;
   const ttsCommand = config.ttsCommand;
-  const conversationTimeoutMs = (config.conversationTimeout ?? 10) * 60 * 1000;
-  const maxHistoryTurns = config.maxHistoryTurns ?? 20;
   const thinkingText = config.thinkingText ?? '请稍候';
   const callAIKeywords: string[] = (config as any).callAIKeywords ?? ['请', '你'];
+  // Use device DID as stable session identifier — OpenClaw manages conversation history
+  const sessionUser: string = (config as any).speaker?.did ?? 'mi-voice-gateway';
 
   // Voice gateway always prepends a TTS-friendly system prompt.
   // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
@@ -115,10 +105,9 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
   }
 
-  // Conversation history shared across voice turns
-  type Message = { role: 'user' | 'assistant'; content: string };
-  const history: Message[] = [];
-  let lastMessageAt = 0;
+  // Concurrency control: abort previous request and stop its TTS when a new query arrives
+  let currentAbortController: AbortController | null = null;
+  let generation = 0;
 
   const originalOnMessage = (config as any).onMessage;
 
@@ -127,42 +116,37 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     async onMessage(engine: any, msg: any) {
       // If OpenClaw is configured and query matches a trigger keyword, forward to agent
       if (openclawUrl && callAIKeywords.some((k) => msg.text.startsWith(k))) {
-
-        // Reset history after inactivity
-        if (Date.now() - lastMessageAt > conversationTimeoutMs) {
-          history.length = 0;
-          console.log('🔄 Conversation history reset (timeout)');
+        // Cancel any in-progress request so its TTS stops
+        if (currentAbortController) {
+          currentAbortController.abort();
         }
-        lastMessageAt = Date.now();
-
-        // Append current user turn
-        history.push({ role: 'user', content: msg.text });
-
-        // Trim to max turns (each turn = 2 messages)
-        while (history.length > maxHistoryTurns * 2) history.splice(0, 2);
+        const myGen = ++generation;
+        const abortController = new AbortController();
+        currentAbortController = abortController;
+        const isActive = () => myGen === generation;
 
         try {
-          const messages = [{ role: 'system', content: systemPrompt }, ...history];
+          // Send only the current message — OpenClaw maintains session history server-side
+          const messages = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: msg.text },
+          ];
           const reply = useStreaming
-            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, ttsCommand)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages);
+            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, sessionUser, isActive, abortController.signal, ttsCommand)
+            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser);
 
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
-            history.push({ role: 'assistant', content: reply });
-            if (!useStreaming) {
+            if (!useStreaming && isActive()) {
               await speakText(reply, ttsCommand);
             }
-          } else {
-            // Remove the user turn we added if no reply came back
-            history.pop();
           }
 
           return { handled: true };
-        } catch (err) {
-          history.pop(); // Remove the user turn on error
+        } catch (err: any) {
+          if (err?.name === 'AbortError') return { handled: true };
           console.error('❌ OpenClaw request failed:', err);
-          await speakText('服务出错，请稍后再试', ttsCommand);
+          if (isActive()) await speakText('服务出错，请稍后再试', ttsCommand);
           return { handled: true };
         }
       }
@@ -237,16 +221,15 @@ async function callOpenClaw(
   token: string | undefined,
   model: string,
   messages: { role: string; content: string }[],
+  user: string,
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ model, stream: false, messages }),
+    body: JSON.stringify({ model, stream: false, messages, user }),
   });
 
   if (!res.ok) {
@@ -268,17 +251,19 @@ async function callOpenClawStreaming(
   token: string | undefined,
   model: string,
   messages: { role: string; content: string }[],
+  user: string,
+  isActive: () => boolean,
+  signal: AbortSignal,
   ttsCommand?: [number, number],
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ model, stream: true, messages }),
+    body: JSON.stringify({ model, stream: true, messages, user }),
+    signal,
   });
 
   if (!res.ok) {
@@ -342,6 +327,7 @@ async function callOpenClawStreaming(
         if (sentence.length >= MIN_SENTENCE_LENGTH) {
           sentenceBuffer = '';
           fullReply += sentence;
+          if (!isActive()) break;
           console.log(`🔊 TTS: ${sentence}`);
           await speakText(sentence, ttsCommand);
           // Wait for estimated playback duration before sending next sentence.
@@ -355,7 +341,7 @@ async function callOpenClawStreaming(
 
     // Play any accumulated fragments + remaining unfinished text as one final TTS call.
     const remaining = (sentenceBuffer + fullText).trim();
-    if (remaining) {
+    if (remaining && isActive()) {
       fullReply += remaining;
       console.log(`🔊 TTS: ${remaining}`);
       await speakText(remaining, ttsCommand);
