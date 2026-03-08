@@ -71,6 +71,16 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
    */
   thinkingText?: string;
 
+  /**
+   * Additional system prompt appended to the built-in TTS prompt.
+   *
+   * Use this for user-specific context, e.g. timezone, preferences, or
+   * instructions that should always be included in every request.
+   *
+   * Example: "用户所在时区是北京时间（UTC+8）。"
+   */
+  userPrompt?: string;
+
 }
 
 /**
@@ -97,6 +107,9 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   // Voice gateway always prepends a TTS-friendly system prompt.
   // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
   const TTS_SYSTEM_PROMPT = '请用自然口语回答，不要使用任何Markdown格式（不要用#标题、**加粗、列表符号、表格等），直接用简洁连贯的中文口语表达，适合语音播报。';
+  const systemPrompt = config.userPrompt
+    ? `${TTS_SYSTEM_PROMPT}\n${config.userPrompt}`
+    : TTS_SYSTEM_PROMPT;
 
   if (!openclawUrl) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
@@ -129,7 +142,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
         while (history.length > maxHistoryTurns * 2) history.splice(0, 2);
 
         try {
-          const messages = [{ role: 'system', content: TTS_SYSTEM_PROMPT }, ...history];
+          const messages = [{ role: 'system', content: systemPrompt }, ...history];
           const reply = useStreaming
             ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, ttsCommand)
             : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages);

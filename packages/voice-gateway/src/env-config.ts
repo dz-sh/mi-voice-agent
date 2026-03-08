@@ -26,6 +26,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         CONVERSATION_TIMEOUT,
         MAX_HISTORY_TURNS,
         THINKING_TEXT,
+        USER_PROMPT,
     } = process.env;
 
     // Validate required fields
@@ -76,6 +77,9 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
 
     // Placeholder text while OpenClaw is processing
     if (THINKING_TEXT) config.thinkingText = THINKING_TEXT;
+
+    // Additional system prompt appended to the built-in TTS prompt
+    if (USER_PROMPT) config.userPrompt = USER_PROMPT;
 
     return config;
 }

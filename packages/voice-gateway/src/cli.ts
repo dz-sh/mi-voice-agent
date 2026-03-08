@@ -40,6 +40,7 @@ Environment Variables (set via .env file):
   STREAM_RESPONSE  Enable streaming TTS (default: true)
   MCP_PORT         Port for embedded MCP server (default: 3001)
   THINKING_TEXT    Placeholder spoken while OpenClaw processes (default: "请稍候")
+  USER_PROMPT      Extra system prompt appended to the built-in TTS prompt (optional)
 `.trim();
 
 // Load .env file
