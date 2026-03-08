@@ -39,6 +39,7 @@ Environment Variables (set via .env file):
   OPENCLAW_MODEL   Model name for requests (default: "openclaw")
   STREAM_RESPONSE  Enable streaming TTS (default: true)
   MCP_PORT         Port for embedded MCP server (default: 3001)
+  THINKING_TEXT    Placeholder spoken while OpenClaw processes (default: "请稍候")
 `.trim();
 
 // Load .env file

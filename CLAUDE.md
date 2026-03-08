@@ -2,7 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Commands
+## Build & Deployment
+
+> **IMPORTANT: Do NOT run `pnpm build` or `pnpm install` directly on the host.**
+> The project is built and run via Docker. Always use Docker commands to build and deploy.
+
+```bash
+# Build and run via Docker (from docker/ directory)
+cd docker && docker compose up --build
+
+# Rebuild without cache
+cd docker && docker compose build --no-cache
+
+# View logs
+cd docker && docker compose logs -f
+```
+
+The pnpm commands below are for reference only (what Docker runs internally):
 
 ```bash
 # Install dependencies
@@ -11,18 +27,8 @@ pnpm install
 # Build all packages
 pnpm build
 
-# Build a single package
-pnpm --filter @mi-voice-agent/voice-gateway build
-pnpm --filter @mi-voice-agent/mcp-server build
-
 # Clean all dist directories
 pnpm clean
-
-# Run voice gateway locally (requires env vars)
-node packages/voice-gateway/dist/cli.js
-
-# Run standalone MCP server locally (requires env vars)
-node packages/mcp-server/dist/index.js
 ```
 
 There are no tests in this repository.

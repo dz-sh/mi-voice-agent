@@ -62,6 +62,15 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
    * Default: 20
    */
   maxHistoryTurns?: number;
+
+  /**
+   * Placeholder text spoken immediately after cancelling XiaoAi's response,
+   * while OpenClaw is processing the request.
+   *
+   * Default: "请稍候"
+   */
+  thinkingText?: string;
+
 }
 
 /**
@@ -82,6 +91,12 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const ttsCommand = config.ttsCommand;
   const conversationTimeoutMs = (config.conversationTimeout ?? 10) * 60 * 1000;
   const maxHistoryTurns = config.maxHistoryTurns ?? 20;
+  const thinkingText = config.thinkingText ?? '请稍候';
+  const callAIKeywords: string[] = (config as any).callAIKeywords ?? ['请', '你'];
+
+  // Voice gateway always prepends a TTS-friendly system prompt.
+  // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
+  const TTS_SYSTEM_PROMPT = '请用自然口语回答，不要使用任何Markdown格式（不要用#标题、**加粗、列表符号、表格等），直接用简洁的中文口语表达，适合语音播报。';
 
   if (!openclawUrl) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
@@ -97,8 +112,9 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const enhancedConfig: MiGPTConfig = {
     ...config,
     async onMessage(engine: any, msg: any) {
-      // If OpenClaw is configured, forward to agent
-      if (openclawUrl) {
+      // If OpenClaw is configured and query matches a trigger keyword, forward to agent
+      if (openclawUrl && callAIKeywords.some((k) => msg.text.startsWith(k))) {
+
         // Reset history after inactivity
         if (Date.now() - lastMessageAt > conversationTimeoutMs) {
           history.length = 0;
@@ -113,9 +129,10 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
         while (history.length > maxHistoryTurns * 2) history.splice(0, 2);
 
         try {
+          const messages = [{ role: 'system', content: TTS_SYSTEM_PROMPT }, ...history];
           const reply = useStreaming
-            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, history, ttsCommand)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, history);
+            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, ttsCommand)
+            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages);
 
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
@@ -169,6 +186,11 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     console.error('⚠️ Failed to start embedded MCP server:', err);
     console.log('   Voice channel is still active. MCP tools unavailable.');
   }
+
+  // Start fast poller to cancel XiaoAi TTS and play placeholder before OpenClaw responds
+  startFastPoller(MiGPT.MiNA, ttsCommand, thinkingText, callAIKeywords).catch((err) => {
+    console.error('⚠️ Fast poller crashed:', err);
+  });
 }
 
 /**
@@ -248,7 +270,14 @@ async function callOpenClawStreaming(
   let fullText = '';
   let fullReply = '';
 
-  const sentenceEndings = /[。？！；?!;\n]/;
+  // \n excluded: newlines are not natural speech pauses and cause short awkward fragments.
+  const sentenceEndings = /[。？！；?!;]/;
+  // Minimum chars before a sentence fragment is played. Short fragments (e.g. a
+  // markdown heading alone) are accumulated in sentenceBuffer until a later sentence
+  // ending makes the combined text long enough to play naturally.
+  const MIN_SENTENCE_LENGTH = 15;
+  // Accumulates short fragments until they form a long enough sentence to play.
+  let sentenceBuffer = '';
 
   try {
     while (true) {
@@ -279,26 +308,90 @@ async function callOpenClawStreaming(
       const match = fullText.match(sentenceEndings);
       if (match && match.index !== undefined) {
         const sentenceEnd = match.index + 1;
-        const sentence = fullText.slice(0, sentenceEnd).trim();
+        // Always consume up to the sentence ending to avoid getting stuck.
+        sentenceBuffer += fullText.slice(0, sentenceEnd);
         fullText = fullText.slice(sentenceEnd);
 
-        if (sentence) {
-          console.log(`🔊 TTS: ${sentence}`);
-          const ok = await speakText(sentence, ttsCommand);
-          console.log(`🔊 TTS result: ${ok}`);
+        const sentence = sentenceBuffer.trim();
+        if (sentence.length >= MIN_SENTENCE_LENGTH) {
+          sentenceBuffer = '';
           fullReply += sentence;
+          console.log(`🔊 TTS: ${sentence}`);
+          await speakText(sentence, ttsCommand);
+          // Wait for estimated playback duration before sending next sentence.
+          // MIoT doAction returns immediately without waiting for audio to finish,
+          // so a back-to-back call would interrupt the current sentence mid-play.
+          await new Promise<void>((r) => setTimeout(r, estimateTTSDuration(sentence)));
         }
+        // else: keep accumulating in sentenceBuffer until next sentence ending
       }
     }
 
-    const remaining = fullText.trim();
+    // Play any accumulated fragments + remaining unfinished text as one final TTS call.
+    const remaining = (sentenceBuffer + fullText).trim();
     if (remaining) {
-      await speakText(remaining, ttsCommand);
       fullReply += remaining;
+      console.log(`🔊 TTS: ${remaining}`);
+      await speakText(remaining, ttsCommand);
     }
 
     return fullReply || undefined;
   } finally {
     reader.releaseLock();
+  }
+}
+
+/**
+ * Estimate TTS playback duration in ms based on text length.
+ *
+ * MIoT doAction returns immediately without waiting for audio to finish.
+ * This estimate prevents back-to-back TTS calls from interrupting each other.
+ * Assumes ~250ms per character (conservative for Chinese TTS), min 1500ms.
+ */
+function estimateTTSDuration(text: string): number {
+  // Strip markdown and emoji for a cleaner character count
+  const stripped = text.replace(/\*+|_+|`+/g, '').trim();
+  return Math.max(1500, stripped.length * 250);
+}
+
+/**
+ * Fast polling loop (300ms) that detects new user queries before MiGPT's own
+ * 1s loop does. On detection: cancels XiaoAi's TTS immediately, then plays a
+ * short placeholder so the user knows the request was received while OpenClaw
+ * is processing.
+ */
+async function startFastPoller(mina: any, ttsCommand?: [number, number], thinkingText = '请稍候', keywords: string[] = []): Promise<void> {
+  let lastTs = 0;
+
+  // Seed lastTs from the most recent conversation entry so we don't re-fire on old messages
+  const init = await mina.getConversations({ limit: 1 }).catch(() => null);
+  if (init?.records?.[0]) {
+    lastTs = init.records[0].time;
+  }
+
+  const POLL_INTERVAL = 300;
+
+  while (true) {
+    await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL));
+    try {
+      const convs = await mina.getConversations({ limit: 2 });
+      const records: any[] = convs?.records ?? [];
+
+      for (const record of records) {
+        if (record.time > lastTs && record.query) {
+          lastTs = record.time;
+          const query: string = record.query;
+          // Only intercept if the query matches a trigger keyword
+          if (keywords.length === 0 || keywords.some((k) => query.startsWith(k))) {
+            console.log(`⚡ Fast poller: intercepting keyword query "${query}"`);
+            await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
+            await speakText(thinkingText, ttsCommand);
+          }
+          break;
+        }
+      }
+    } catch {
+      // Ignore transient polling errors
+    }
   }
 }

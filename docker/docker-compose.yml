@@ -21,6 +21,7 @@ services:
       - OPENCLAW_MODEL=${OPENCLAW_MODEL:-}
       - STREAM_RESPONSE=${STREAM_RESPONSE:-true}
       - MCP_PORT=${MCP_PORT:-3001}
+      - THINKING_TEXT=${THINKING_TEXT:-}
     ports:
       - "${MCP_PORT:-3001}:${MCP_PORT:-3001}"
 

@@ -25,6 +25,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         TTS_AIID,
         CONVERSATION_TIMEOUT,
         MAX_HISTORY_TURNS,
+        THINKING_TEXT,
     } = process.env;
 
     // Validate required fields
@@ -72,6 +73,9 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
     // Conversation history settings
     if (CONVERSATION_TIMEOUT) config.conversationTimeout = parseInt(CONVERSATION_TIMEOUT, 10);
     if (MAX_HISTORY_TURNS) config.maxHistoryTurns = parseInt(MAX_HISTORY_TURNS, 10);
+
+    // Placeholder text while OpenClaw is processing
+    if (THINKING_TEXT) config.thinkingText = THINKING_TEXT;
 
     return config;
 }
