@@ -96,7 +96,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
 
   // Voice gateway always prepends a TTS-friendly system prompt.
   // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
-  const TTS_SYSTEM_PROMPT = '请用自然口语回答，不要使用任何Markdown格式（不要用#标题、**加粗、列表符号、表格等），直接用简洁的中文口语表达，适合语音播报。';
+  const TTS_SYSTEM_PROMPT = '请用自然口语回答，不要使用任何Markdown格式（不要用#标题、**加粗、列表符号、表格等），直接用简洁连贯的中文口语表达，适合语音播报。';
 
   if (!openclawUrl) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
@@ -194,13 +194,26 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
 }
 
 /**
+ * Normalize text for TTS by removing spaces inserted between digits and
+ * Chinese characters (a common LLM typographic habit that disrupts TTS rhythm).
+ * e.g. "凌晨 2 点 09 分" → "凌晨2点09分", "3 月 8 日" → "3月8日"
+ */
+function normalizeTTS(text: string): string {
+  const CJK = '\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef';
+  return text
+    .replace(new RegExp(`([${CJK}]) +(\\d)`, 'g'), '$1$2')
+    .replace(new RegExp(`(\\d) +([${CJK}])`, 'g'), '$1$2');
+}
+
+/**
  * Speak text via MIoT doAction (if ttsCommand set) or MiNA play fallback.
  */
 async function speakText(text: string, ttsCommand?: [number, number]): Promise<boolean> {
+  const normalized = normalizeTTS(text);
   if (ttsCommand) {
-    return MiGPT.MiOT!.doAction(ttsCommand[0], ttsCommand[1], text);
+    return MiGPT.MiOT!.doAction(ttsCommand[0], ttsCommand[1], normalized);
   }
-  return MiGPT.MiNA!.play({ text }) ?? false;
+  return MiGPT.MiNA!.play({ text: normalized }) ?? false;
 }
 
 /**
