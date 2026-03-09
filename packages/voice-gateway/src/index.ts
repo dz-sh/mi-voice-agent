@@ -297,12 +297,16 @@ async function callOpenClawStreaming(
   let fullText = '';
   let fullReply = '';
 
-  // \n excluded: newlines are not natural speech pauses and cause short awkward fragments.
-  const sentenceEndings = /[。？！；?!;]/;
-  // Minimum chars before a sentence fragment is played. Short fragments (e.g. a
-  // markdown heading alone) are accumulated in sentenceBuffer until a later sentence
-  // ending makes the combined text long enough to play naturally.
+  // Sentence-ending punctuation. English period matched only after a letter and before
+  // whitespace to avoid splitting decimals (3.14) or abbreviations mid-word.
+  // \n excluded: newlines cause short awkward fragments in markdown responses.
+  const sentenceEndings = /[。？！；?!;]|(?<=[a-zA-Z])\.(?=\s)/;
+  // Minimum chars before a sentence fragment is played. Short fragments are accumulated
+  // in sentenceBuffer until a later ending makes the combined text long enough.
   const MIN_SENTENCE_LENGTH = 15;
+  // Maximum buffer length before forcing playback even without a sentence ending.
+  // Prevents long silences when the model outputs unpunctuated content.
+  const MAX_BUFFER_LENGTH = 80;
   // Accumulates short fragments until they form a long enough sentence to play.
   let sentenceBuffer = '';
 
@@ -332,10 +336,11 @@ async function callOpenClawStreaming(
         }
       }
 
-      const match = fullText.match(sentenceEndings);
-      if (match && match.index !== undefined) {
-        const sentenceEnd = match.index + 1;
-        // Always consume up to the sentence ending to avoid getting stuck.
+      // Process ALL sentence endings accumulated in fullText, not just the first.
+      // Multiple sentences may arrive in a single SSE chunk or across rapid chunks.
+      let match: RegExpMatchArray | null;
+      while ((match = fullText.match(sentenceEndings)) !== null && match.index !== undefined) {
+        const sentenceEnd = match.index + match[0].length;
         sentenceBuffer += fullText.slice(0, sentenceEnd);
         fullText = fullText.slice(sentenceEnd);
 
@@ -352,6 +357,18 @@ async function callOpenClawStreaming(
           await new Promise<void>((r) => setTimeout(r, estimateTTSDuration(sentence)));
         }
         // else: keep accumulating in sentenceBuffer until next sentence ending
+      }
+
+      // Force playback if buffer exceeds max length (e.g. unpunctuated long content).
+      if (sentenceBuffer.length >= MAX_BUFFER_LENGTH) {
+        const sentence = sentenceBuffer.trim();
+        sentenceBuffer = '';
+        fullReply += sentence;
+        if (isActive()) {
+          console.log(`🔊 TTS (overflow): ${sentence}`);
+          await speakText(sentence, ttsCommand);
+          await new Promise<void>((r) => setTimeout(r, estimateTTSDuration(sentence)));
+        }
       }
     }
 
@@ -374,12 +391,16 @@ async function callOpenClawStreaming(
  *
  * MIoT doAction returns immediately without waiting for audio to finish.
  * This estimate prevents back-to-back TTS calls from interrupting each other.
- * Assumes ~250ms per character (conservative for Chinese TTS), min 1500ms.
+ *
+ * CJK characters: ~260ms each (Chinese TTS ~3.8 chars/sec, with safety margin).
+ * ASCII characters: ~80ms each (English TTS is significantly faster).
+ * Minimum: 1500ms to account for TTS engine startup latency.
  */
 function estimateTTSDuration(text: string): number {
-  // Strip markdown and emoji for a cleaner character count
   const stripped = text.replace(/\*+|_+|`+/g, '').trim();
-  return Math.max(1500, stripped.length * 250);
+  const cjkCount = (stripped.match(/[\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef]/g) ?? []).length;
+  const asciiCount = stripped.length - cjkCount;
+  return Math.max(1500, cjkCount * 260 + asciiCount * 80);
 }
 
 /**
