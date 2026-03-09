@@ -115,50 +115,15 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
   }
 
-  // Concurrency control: abort previous request and stop its TTS when a new query arrives
-  let currentAbortController: AbortController | null = null;
-  let generation = 0;
-
   const originalOnMessage = (config as any).onMessage;
 
   const enhancedConfig: MiGPTConfig = {
     ...config,
     async onMessage(engine: any, msg: any) {
-      // If OpenClaw is configured and query matches a trigger keyword, forward to agent
+      // Safety net: if onMessage is somehow called for a keyword query, prevent
+      // MiGPT's built-in AI from responding (OpenClaw is handled by fast poller).
       if (openclawUrl && callAIKeywords.some((k) => msg.text.startsWith(k))) {
-        // Cancel any in-progress request so its TTS stops
-        if (currentAbortController) {
-          currentAbortController.abort();
-        }
-        const myGen = ++generation;
-        const abortController = new AbortController();
-        currentAbortController = abortController;
-        const isActive = () => myGen === generation;
-
-        try {
-          // Send only the current message — OpenClaw maintains session history server-side
-          const messages = [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: msg.text },
-          ];
-          const reply = useStreaming
-            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, sessionUser, isActive, abortController.signal, ttsCommand, openclawAgentId)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser, abortController.signal, openclawAgentId);
-
-          if (reply) {
-            console.log(`🤖 Agent reply: ${reply}`);
-            if (!useStreaming && isActive()) {
-              await speakText(reply, ttsCommand);
-            }
-          }
-
-          return { handled: true };
-        } catch (err: any) {
-          if (err?.name === 'AbortError') return { handled: true };
-          console.error('❌ OpenClaw request failed:', err);
-          if (isActive()) await speakText('服务出错，请稍后再试', ttsCommand);
-          return { handled: true };
-        }
+        return { handled: true };
       }
 
       // Fallback to user's custom onMessage or default AI
@@ -194,8 +159,21 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     console.log('   Voice channel is still active. MCP tools unavailable.');
   }
 
-  // Start fast poller to cancel XiaoAi TTS and play placeholder before OpenClaw responds
-  startFastPoller(MiGPT.MiNA, ttsCommand, thinkingText, callAIKeywords).catch((err) => {
+  // Start fast poller — detects queries, cancels XiaoAi TTS, and calls OpenClaw.
+  // NOTE: We call OpenClaw here (not in onMessage) because MiMessage.fetchNextMessage()
+  // filters conversation records by answer type ["TTS","LLM"]. When the fast poller
+  // cancels XiaoAi's TTS at ~300ms, the answer isn't yet recorded, so the record is
+  // filtered out and onMessage is never triggered. The fast poller uses the raw
+  // getConversations API without that filter, so it correctly sees the query.
+  startFastPoller(MiGPT.MiNA, ttsCommand, thinkingText, callAIKeywords, {
+    url: openclawUrl,
+    token: openclawToken,
+    model: openclawModel,
+    agentId: openclawAgentId,
+    useStreaming,
+    systemPrompt,
+    sessionUser,
+  }).catch((err) => {
     console.error('⚠️ Fast poller crashed:', err);
   });
 }
@@ -299,11 +277,13 @@ async function callOpenClawStreaming(
 
   // Sentence-ending punctuation. English period matched only after a letter and before
   // whitespace to avoid splitting decimals (3.14) or abbreviations mid-word.
-  // \n excluded: newlines cause short awkward fragments in markdown responses.
-  const sentenceEndings = /[。？！；?!;]|(?<=[a-zA-Z])\.(?=\s)/;
+  // \n included: paragraph/line breaks are natural TTS pauses for structured responses.
+  const sentenceEndings = /[。？！；?!;\n]|(?<=[a-zA-Z])\.(?=\s)/;
   // Minimum chars before a sentence fragment is played. Short fragments are accumulated
   // in sentenceBuffer until a later ending makes the combined text long enough.
-  const MIN_SENTENCE_LENGTH = 15;
+  // 30 prevents standalone headers / short bullet points from becoming their own TTS
+  // calls, which causes choppy speech.
+  const MIN_SENTENCE_LENGTH = 30;
   // Maximum buffer length before forcing playback even without a sentence ending.
   // Prevents long silences when the model outputs unpunctuated content.
   const MAX_BUFFER_LENGTH = 80;
@@ -359,10 +339,13 @@ async function callOpenClawStreaming(
         // else: keep accumulating in sentenceBuffer until next sentence ending
       }
 
-      // Force playback if buffer exceeds max length (e.g. unpunctuated long content).
-      if (sentenceBuffer.length >= MAX_BUFFER_LENGTH) {
-        const sentence = sentenceBuffer.trim();
+      // Force playback if total accumulated content exceeds max length.
+      // Checks sentenceBuffer + fullText so long unpunctuated content doesn't
+      // silently accumulate in fullText and get sent as one huge TTS call.
+      if (sentenceBuffer.length + fullText.length >= MAX_BUFFER_LENGTH) {
+        const sentence = (sentenceBuffer + fullText).trim();
         sentenceBuffer = '';
+        fullText = '';
         fullReply += sentence;
         if (isActive()) {
           console.log(`🔊 TTS (overflow): ${sentence}`);
@@ -403,14 +386,39 @@ function estimateTTSDuration(text: string): number {
   return Math.max(1500, cjkCount * 260 + asciiCount * 80);
 }
 
+interface OpenClawConfig {
+  url: string | undefined;
+  token: string | undefined;
+  model: string;
+  agentId: string | undefined;
+  useStreaming: boolean;
+  systemPrompt: string;
+  sessionUser: string;
+}
+
 /**
  * Fast polling loop (300ms) that detects new user queries before MiGPT's own
- * 1s loop does. On detection: cancels XiaoAi's TTS immediately, then plays a
- * short placeholder so the user knows the request was received while OpenClaw
- * is processing.
+ * 1s loop does. On detection:
+ * 1. Cancels XiaoAi's TTS immediately
+ * 2. Plays a short placeholder so the user knows the request was received
+ * 3. Calls OpenClaw and plays the TTS response sentence by sentence
+ *
+ * OpenClaw is called here (not in MiGPT's onMessage hook) because
+ * MiMessage.fetchNextMessage() filters conversation records by answer type
+ * ["TTS","LLM"]. When this poller cancels XiaoAi's TTS at ~300ms, the answer
+ * hasn't been recorded yet, so MiMessage silently drops the message.
  */
-async function startFastPoller(mina: any, ttsCommand?: [number, number], thinkingText = '请稍候', keywords: string[] = []): Promise<void> {
+async function startFastPoller(
+  mina: any,
+  ttsCommand: [number, number] | undefined,
+  thinkingText: string,
+  keywords: string[],
+  openclaw: OpenClawConfig,
+): Promise<void> {
   let lastTs = 0;
+  // Concurrency control: abort in-progress OpenClaw request when a new query arrives
+  let currentAbortController: AbortController | null = null;
+  let generation = 0;
 
   // Seed lastTs from the most recent conversation entry so we don't re-fire on old messages
   const init = await mina.getConversations({ limit: 1 }).catch(() => null);
@@ -433,8 +441,63 @@ async function startFastPoller(mina: any, ttsCommand?: [number, number], thinkin
           // Only intercept if the query matches a trigger keyword
           if (keywords.length === 0 || keywords.some((k) => query.startsWith(k))) {
             console.log(`⚡ Fast poller: intercepting keyword query "${query}"`);
+
+            // Cancel any in-progress OpenClaw request
+            if (currentAbortController) {
+              currentAbortController.abort();
+            }
+            const myGen = ++generation;
+            const abortController = new AbortController();
+            currentAbortController = abortController;
+            const isActive = () => myGen === generation;
+
+            // Cancel XiaoAi TTS and play thinking placeholder
             await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
             await speakText(thinkingText, ttsCommand);
+
+            // When using MIoT TTS (ttsCommand), our responses go through MIoT,
+            // not mibrain. Retrying cancel_tts is safe: it only cancels mibrain
+            // (XiaoAi's response), not our sentences. We retry after the thinking
+            // text finishes because XiaoAi's LLM response typically starts
+            // 500ms–2s after the query is detected, after our cancel_tts has
+            // already been ignored.
+            if (ttsCommand) {
+              const thinkDuration = estimateTTSDuration(thinkingText);
+              const capturedIsActive = isActive;
+              setTimeout(async () => {
+                for (let i = 0; i < 5 && capturedIsActive(); i++) {
+                  await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
+                  if (i < 4) await new Promise<void>((r) => setTimeout(r, 500));
+                }
+              }, thinkDuration);
+            }
+
+            // Fire-and-forget: call OpenClaw and play TTS response asynchronously
+            // so the poller can continue detecting new messages without blocking.
+            if (openclaw.url) {
+              (async () => {
+                try {
+                  const messages = [
+                    { role: 'system', content: openclaw.systemPrompt },
+                    { role: 'user', content: query },
+                  ];
+                  const reply = openclaw.useStreaming
+                    ? await callOpenClawStreaming(openclaw.url!, openclaw.token, openclaw.model, messages, openclaw.sessionUser, isActive, abortController.signal, ttsCommand, openclaw.agentId)
+                    : await callOpenClaw(openclaw.url!, openclaw.token, openclaw.model, messages, openclaw.sessionUser, abortController.signal, openclaw.agentId);
+
+                  if (reply) {
+                    console.log(`🤖 Agent reply: ${reply}`);
+                    if (!openclaw.useStreaming && isActive()) {
+                      await speakText(reply, ttsCommand);
+                    }
+                  }
+                } catch (err: any) {
+                  if (err?.name === 'AbortError') return;
+                  console.error('❌ OpenClaw request failed:', err);
+                  if (isActive()) await speakText('服务出错，请稍后再试', ttsCommand);
+                }
+              })();
+            }
           }
           break;
         }
