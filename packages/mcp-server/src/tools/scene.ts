@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { bridge } from '../miot-bridge.js';
+import { withDidLock } from '../did-lock.js';
 
 const ActionStep = z.object({
   did: z.string().describe('Device DID'),
@@ -38,45 +39,47 @@ export const sceneTools = {
     }) => {
       await bridge.init();
 
-      const results: Array<{ step: number; success: boolean; error?: string }> = [];
+      return withDidLock(async () => {
+        const results: Array<{ step: number; success: boolean; error?: string }> = [];
 
-      for (let i = 0; i < args.steps.length; i++) {
-        const step = args.steps[i];
+        for (let i = 0; i < args.steps.length; i++) {
+          const step = args.steps[i];
 
-        if (step.delay_ms > 0) {
-          await new Promise((resolve) => setTimeout(resolve, step.delay_ms));
-        }
-
-        const originalDid = bridge.miot.account.device.did;
-        bridge.miot.account.device.did = step.did;
-
-        try {
-          let success = false;
-          if (step.type === 'set_property' && step.piid != null) {
-            success = await bridge.miot.setProperty(step.siid, step.piid, step.value);
-          } else if (step.type === 'do_action' && step.aiid != null) {
-            success = await bridge.miot.doAction(
-              step.siid,
-              step.aiid,
-              step.value ?? [],
-            );
+          if (step.delay_ms > 0) {
+            await new Promise((resolve) => setTimeout(resolve, step.delay_ms));
           }
-          results.push({ step: i + 1, success });
-        } catch (err: any) {
-          results.push({ step: i + 1, success: false, error: err.message });
-        } finally {
-          bridge.miot.account.device.did = originalDid;
-        }
-      }
 
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({ scene: args.name, results }, null, 2),
-          },
-        ],
-      };
+          const originalDid = bridge.miot.account.device.did;
+          bridge.miot.account.device.did = step.did;
+
+          try {
+            let success = false;
+            if (step.type === 'set_property' && step.piid != null) {
+              success = await bridge.miot.setProperty(step.siid, step.piid, step.value);
+            } else if (step.type === 'do_action' && step.aiid != null) {
+              success = await bridge.miot.doAction(
+                step.siid,
+                step.aiid,
+                step.value ?? [],
+              );
+            }
+            results.push({ step: i + 1, success });
+          } catch (err: any) {
+            results.push({ step: i + 1, success: false, error: err.message });
+          } finally {
+            bridge.miot.account.device.did = originalDid;
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ scene: args.name, results }, null, 2),
+            },
+          ],
+        };
+      });
     },
   },
 };

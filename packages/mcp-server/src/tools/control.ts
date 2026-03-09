@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { bridge } from '../miot-bridge.js';
+import { withDidLock } from '../did-lock.js';
 
 export const controlTools = {
   get_property: {
@@ -13,22 +14,23 @@ export const controlTools = {
     }),
     handler: async (args: { did: string; siid: number; piid: number }) => {
       await bridge.init();
-      // Temporarily override the device DID for this call
-      const originalDid = bridge.miot.account.device.did;
-      bridge.miot.account.device.did = args.did;
-      try {
-        const value = await bridge.miot.getProperty(args.siid, args.piid);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({ did: args.did, siid: args.siid, piid: args.piid, value }),
-            },
-          ],
-        };
-      } finally {
-        bridge.miot.account.device.did = originalDid;
-      }
+      return withDidLock(async () => {
+        const originalDid = bridge.miot.account.device.did;
+        bridge.miot.account.device.did = args.did;
+        try {
+          const value = await bridge.miot.getProperty(args.siid, args.piid);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ did: args.did, siid: args.siid, piid: args.piid, value }),
+              },
+            ],
+          };
+        } finally {
+          bridge.miot.account.device.did = originalDid;
+        }
+      });
     },
   },
 
@@ -44,21 +46,23 @@ export const controlTools = {
     }),
     handler: async (args: { did: string; siid: number; piid: number; value: any }) => {
       await bridge.init();
-      const originalDid = bridge.miot.account.device.did;
-      bridge.miot.account.device.did = args.did;
-      try {
-        const success = await bridge.miot.setProperty(args.siid, args.piid, args.value);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({ success, did: args.did, siid: args.siid, piid: args.piid, value: args.value }),
-            },
-          ],
-        };
-      } finally {
-        bridge.miot.account.device.did = originalDid;
-      }
+      return withDidLock(async () => {
+        const originalDid = bridge.miot.account.device.did;
+        bridge.miot.account.device.did = args.did;
+        try {
+          const success = await bridge.miot.setProperty(args.siid, args.piid, args.value);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ success, did: args.did, siid: args.siid, piid: args.piid, value: args.value }),
+              },
+            ],
+          };
+        } finally {
+          bridge.miot.account.device.did = originalDid;
+        }
+      });
     },
   },
 
@@ -77,21 +81,23 @@ export const controlTools = {
     }),
     handler: async (args: { did: string; siid: number; aiid: number; args: any[] }) => {
       await bridge.init();
-      const originalDid = bridge.miot.account.device.did;
-      bridge.miot.account.device.did = args.did;
-      try {
-        const success = await bridge.miot.doAction(args.siid, args.aiid, args.args);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({ success, did: args.did, siid: args.siid, aiid: args.aiid }),
-            },
-          ],
-        };
-      } finally {
-        bridge.miot.account.device.did = originalDid;
-      }
+      return withDidLock(async () => {
+        const originalDid = bridge.miot.account.device.did;
+        bridge.miot.account.device.did = args.did;
+        try {
+          const success = await bridge.miot.doAction(args.siid, args.aiid, args.args);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ success, did: args.did, siid: args.siid, aiid: args.aiid }),
+              },
+            ],
+          };
+        } finally {
+          bridge.miot.account.device.did = originalDid;
+        }
+      });
     },
   },
 };

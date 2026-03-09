@@ -133,7 +133,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
           ];
           const reply = useStreaming
             ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, sessionUser, isActive, abortController.signal, ttsCommand)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser);
+            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser, abortController.signal);
 
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
@@ -222,6 +222,7 @@ async function callOpenClaw(
   model: string,
   messages: { role: string; content: string }[],
   user: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -230,6 +231,7 @@ async function callOpenClaw(
     method: 'POST',
     headers,
     body: JSON.stringify({ model, stream: false, messages, user }),
+    signal,
   });
 
   if (!res.ok) {

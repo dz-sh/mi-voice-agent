@@ -5,6 +5,19 @@ import type { MIoT, MiNA } from '@mi-gpt/miot';
 import { z } from 'zod';
 
 /**
+ * Simple async mutex to serialize DID-swapping MIoT operations.
+ * Prevents race conditions when parallel tool calls target different devices.
+ */
+let didLock = Promise.resolve();
+function withDidLock<T>(fn: () => Promise<T>): Promise<T> {
+    let release: () => void;
+    const next = new Promise<void>((r) => { release = r; });
+    const prev = didLock;
+    didLock = next;
+    return prev.then(fn).finally(() => release!());
+}
+
+/**
  * Start an embedded MCP server inside voice-gateway.
  *
  * Shares the same MIoT/MiNA session as the voice channel,
@@ -106,7 +119,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             siid: z.number().describe('Service ID'),
             piid: z.number().describe('Property ID'),
         },
-        async (args) => {
+        async (args) => withDidLock(async () => {
             const originalDid = miot.account.device.did;
             miot.account.device.did = args.did;
             try {
@@ -115,7 +128,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             } finally {
                 miot.account.device.did = originalDid;
             }
-        },
+        }),
     );
 
     server.tool(
@@ -127,7 +140,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             piid: z.number().describe('Property ID'),
             value: z.any().describe('Value to set'),
         },
-        async (args) => {
+        async (args) => withDidLock(async () => {
             const originalDid = miot.account.device.did;
             miot.account.device.did = args.did;
             try {
@@ -136,7 +149,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             } finally {
                 miot.account.device.did = originalDid;
             }
-        },
+        }),
     );
 
     server.tool(
@@ -148,7 +161,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             aiid: z.number().describe('Action ID'),
             args: z.array(z.any()).default([]).describe('Action arguments'),
         },
-        async (args) => {
+        async (args) => withDidLock(async () => {
             const originalDid = miot.account.device.did;
             miot.account.device.did = args.did;
             try {
@@ -157,7 +170,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             } finally {
                 miot.account.device.did = originalDid;
             }
-        },
+        }),
     );
 
     // ── Speaker Tools ──
@@ -168,7 +181,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
         { text: z.string().describe('Text content to speak') },
         async (args) => {
             const success = ttsCommand
-                ? await miot.doAction(ttsCommand[0], ttsCommand[1], args.text)
+                ? await withDidLock(() => miot.doAction(ttsCommand[0], ttsCommand[1], args.text))
                 : await mina.play({ text: args.text });
             return { content: [{ type: 'text' as const, text: JSON.stringify({ success, text: args.text }) }] };
         },
@@ -223,7 +236,7 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             name: z.string().describe('Scene name'),
             steps: z.array(ActionStep).min(1).describe('Ordered action steps'),
         },
-        async (args) => {
+        async (args) => withDidLock(async () => {
             const results: Array<{ step: number; success: boolean; error?: string }> = [];
 
             for (let i = 0; i < args.steps.length; i++) {
@@ -251,6 +264,6 @@ function registerTools(server: McpServer, miot: MIoT, mina: MiNA, ttsCommand?: [
             }
 
             return { content: [{ type: 'text' as const, text: JSON.stringify({ scene: args.name, results }, null, 2) }] };
-        },
+        }),
     );
 }
