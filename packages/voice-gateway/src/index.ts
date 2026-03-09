@@ -23,6 +23,15 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
   openclawModel?: string;
 
   /**
+   * OpenClaw agent ID to handle voice channel requests.
+   *
+   * Sent as the `x-openclaw-agent-id` header on every request.
+   *
+   * Default: "main"
+   */
+  openclawAgentId?: string;
+
+  /**
    * Whether to use streaming mode for TTS responses.
    *
    * Some XiaoAi speakers don't support streaming TTS.
@@ -86,6 +95,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const openclawUrl = config.openclawUrl;
   const openclawToken = config.openclawToken;
   const openclawModel = config.openclawModel ?? 'openclaw';
+  const openclawAgentId = config.openclawAgentId;
   const useStreaming = config.streamResponse ?? true;
   const mcpPort = config.mcpPort ?? 3001;
   const ttsCommand = config.ttsCommand;
@@ -132,8 +142,8 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
             { role: 'user', content: msg.text },
           ];
           const reply = useStreaming
-            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, sessionUser, isActive, abortController.signal, ttsCommand)
-            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser, abortController.signal);
+            ? await callOpenClawStreaming(openclawUrl, openclawToken, openclawModel, messages, sessionUser, isActive, abortController.signal, ttsCommand, openclawAgentId)
+            : await callOpenClaw(openclawUrl, openclawToken, openclawModel, messages, sessionUser, abortController.signal, openclawAgentId);
 
           if (reply) {
             console.log(`🤖 Agent reply: ${reply}`);
@@ -223,9 +233,11 @@ async function callOpenClaw(
   messages: { role: string; content: string }[],
   user: string,
   signal?: AbortSignal,
+  agentId?: string,
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (agentId) headers['x-openclaw-agent-id'] = agentId;
 
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
@@ -257,9 +269,11 @@ async function callOpenClawStreaming(
   isActive: () => boolean,
   signal: AbortSignal,
   ttsCommand?: [number, number],
+  agentId?: string,
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (agentId) headers['x-openclaw-agent-id'] = agentId;
 
   const res = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',

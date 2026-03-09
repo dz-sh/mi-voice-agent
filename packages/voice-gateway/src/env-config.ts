@@ -19,6 +19,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         OPENCLAW_URL,
         OPENCLAW_TOKEN,
         OPENCLAW_MODEL,
+        OPENCLAW_AGENT_ID,
         STREAM_RESPONSE,
         MCP_PORT,
         TTS_SIID,
@@ -56,6 +57,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         config.openclawUrl = OPENCLAW_URL;
         config.openclawToken = OPENCLAW_TOKEN;
         config.openclawModel = OPENCLAW_MODEL || 'openclaw';
+        config.openclawAgentId = OPENCLAW_AGENT_ID || 'main';
     }
 
     // Streaming TTS mode (default: true)
