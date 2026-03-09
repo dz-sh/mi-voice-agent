@@ -30,16 +30,16 @@ Mi-Voice-Agent turns your Xiaomi XiaoAI speaker into a voice channel for any AI 
 ```
 
 **Single process, single MIoT session.** The voice gateway acts as both:
-- **Voice Channel** — captures speech from XiaoAi, forwards to OpenClaw, plays TTS response
+- **Voice Channel** — captures speech from XiaoAi, forwards to the agent, plays TTS response sentence by sentence (streaming) or all at once
 - **MCP Server** — exposes device control tools via Streamable HTTP transport on port 3001
 
 ## Project Structure
 
 *   `packages/voice-gateway/` — **Voice Gateway**. Single process that provides:
-    - Voice channel: XiaoAi ↔ OpenClaw
+    - Voice channel: XiaoAi ↔ OpenClaw (or any OpenAI-compatible agent)
     - Embedded MCP server: device control tools via Streamable HTTP
     - Shared MIoT session (no dual-login conflicts)
-*   `packages/mcp-server/` — **Standalone MCP Server**. For text-only agents (e.g., Claude Desktop) that don't need voice. Uses stdio transport.
+*   `packages/mcp-server/` — **Standalone MCP Server**. For text-only clients (e.g., Claude Desktop) that don't need voice. Uses stdio transport. Do not run simultaneously with voice-gateway on the same Xiaomi account.
 
 ## Quick Start
 
@@ -50,20 +50,32 @@ Mi-Voice-Agent turns your Xiaomi XiaoAI speaker into a voice channel for any AI 
 
 ### Environment Variables
 
-| Variable | Description | Required |
+**Required**
+
+| Variable | Description |
+|---|---|
+| `MI_USER` | Xiaomi account ID (numeric) |
+| `MI_PASS` | Xiaomi account password |
+| `MI_DID` | XiaoAi speaker device ID (as shown in MiHome app) |
+| `OPENCLAW_URL` | Agent gateway URL (e.g., `http://localhost:18789`) |
+
+**Optional**
+
+| Variable | Default | Description |
 |---|---|---|
-| `MI_USER` | Xiaomi account ID (numeric) | ✅ |
-| `MI_PASS` | Xiaomi account password | ✅ |
-| `MI_DID` | XiaoAi speaker name (as shown in MiHome app) | ✅ |
-| `OPENCLAW_URL` | Agent gateway URL (e.g., `http://localhost:3000`) | ✅ |
-| `OPENCLAW_TOKEN` | Agent auth token | — |
-| `OPENCLAW_MODEL` | Model name for requests (default: `openclaw`) | — |
-| `STREAM_RESPONSE` | Enable streaming TTS (default: `true`, set `false` for [unsupported speakers](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md)) | — |
-| `MCP_PORT` | Embedded MCP server port (default: `3001`) | — |
-| `MI_DEBUG` | Enable debug logging (default: `false`) | — |
-| `MI_TIMEOUT` | Request timeout in ms (default: `5000`) | — |
-| `MI_HEARTBEAT` | Message polling interval in ms (default: `1000`) | — |
-| `CALL_AI_KEYWORDS` | Comma-separated wake words (default: `请,你`) | — |
+| `MI_PASS_TOKEN` | — | passToken alternative to `MI_PASS` |
+| `OPENCLAW_TOKEN` | — | Agent auth token |
+| `OPENCLAW_MODEL` | `openclaw` | Model name sent in requests |
+| `OPENCLAW_AGENT_ID` | `main` | OpenClaw agent ID to route voice requests to (sent as `x-openclaw-agent-id` header) |
+| `STREAM_RESPONSE` | `true` | Enable streaming TTS. Set `false` for [unsupported speakers](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md) |
+| `MCP_PORT` | `3001` | Embedded MCP server port |
+| `TTS_SIID` / `TTS_AIID` | — | MIoT TTS action IDs for speakers where MiNA TTS doesn't work (e.g., L05C: `5`/`3`) |
+| `THINKING_TEXT` | `请稍候` | Placeholder spoken while the agent is processing |
+| `USER_PROMPT` | — | Extra system prompt appended to every request (e.g., timezone, preferences) |
+| `CALL_AI_KEYWORDS` | `请,你` | Comma-separated wake words that trigger agent forwarding |
+| `MI_DEBUG` | `false` | Enable debug logging |
+| `MI_TIMEOUT` | `5000` | Request timeout in ms |
+| `MI_HEARTBEAT` | `1000` | Message polling interval in ms |
 
 ### Method 1: Docker Compose (Recommended)
 
@@ -83,28 +95,60 @@ docker compose up -d
 ```bash
 export MI_USER="Your Xiaomi ID"
 export MI_PASS="Your Password"
-export MI_DID="Your XiaoAi Speaker Name"
-export OPENCLAW_URL="http://localhost:3000"
+export MI_DID="Your XiaoAi Speaker DID"
+export OPENCLAW_URL="http://localhost:18789"
 
 npx @mi-voice-agent/voice-gateway
 ```
 
-## Agent Integration
+## OpenClaw Integration
 
-To connect OpenClaw (or any other HTTP-based MCP Client) to `voice-gateway`'s embedded MCP server:
+### 1. Connect the MCP Server
 
-1. Start `voice-gateway` (e.g., via Docker Compose).
-2. Configure your agent with an HTTP/SSE MCP connection pointing to `http://<your-ip>:3001/mcp`.
+Start `voice-gateway`, then add the embedded MCP server to your OpenClaw agent configuration:
 
-For clients requiring `stdio` transport (like Claude Desktop), you can still run the standalone MCP server via `npx @mi-voice-agent/mcp-server`, but ensure the voice-gateway is not running simultaneously to avoid duplicate Xiaomi cloud logins.
+- **Type**: `sse` (Streamable HTTP)
+- **URL**: `http://<your-gateway-ip>:3001/mcp`
 
+### 2. Install the mihome Skill
 
-See [`.openclaw/skills/mihome/SKILL.md`](.openclaw/skills/mihome/SKILL.md) for the full tool reference and usage guide.
+Copy [`.openclaw/skills/mihome/`](.openclaw/skills/mihome/) into your OpenClaw skills directory so the agent knows how to use the MCP tools:
+
+```bash
+cp -r .openclaw/skills/mihome ~/.openclaw/skills/
+```
+
+See [`.openclaw/skills/mihome/SKILL.md`](.openclaw/skills/mihome/SKILL.md) for the full tool reference.
+
+### 3. Route Voice Requests to a Specific Agent
+
+By default, voice requests are routed to the `main` agent. To use a different agent (e.g., a dedicated `public` agent), set `OPENCLAW_AGENT_ID` in your `.env`:
+
+```env
+OPENCLAW_AGENT_ID=public
+```
+
+This sends the `x-openclaw-agent-id` header on every request, which OpenClaw uses to route to the specified agent.
+
+### MCP Tools
+
+| Tool | Description |
+|---|---|
+| `list_devices` | List all MiHome devices |
+| `get_conversations` | Fetch recent XiaoAi conversation history |
+| `get_property` | Read a MIoT device property |
+| `set_property` | Set a MIoT device property |
+| `do_action` | Execute a MIoT device action |
+| `run_scene` | Execute multiple device operations in sequence |
+| `speaker_tts` | Play TTS text through the speaker |
+| `speaker_play_url` | Play audio from a URL |
+| `speaker_get_status` | Get speaker play status and volume |
+| `speaker_set_volume` | Set speaker volume |
 
 ## Known Limitations
 
 - **Speaker compatibility**: Some XiaoAi models don't support streaming TTS. Set `STREAM_RESPONSE=false` for those models. See [compatibility list](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md).
-- **Standalone MCP server**: If using `packages/mcp-server` separately (without voice-gateway), it maintains its own MIoT session. Avoid running both simultaneously with the same Xiaomi account.
+- **Standalone MCP server**: If using `packages/mcp-server` separately (without voice-gateway), avoid running both simultaneously with the same Xiaomi account to prevent dual-login conflicts.
 
 ## Dependencies
 

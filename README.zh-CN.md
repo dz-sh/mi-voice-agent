@@ -1,82 +1,97 @@
-# Mi-Voice-Agent (小爱音箱大模型网关)
+# Mi-Voice-Agent（小爱音箱 AI 语音网关）
 
 [![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![中文](https://img.shields.io/badge/Language-中文-red)](README.zh-CN.md)
 
-> 将小爱音箱连接至外部大模型 (LLM) Agent 的语音网关与 MCP 服务器。
+> 将小爱音箱接入外部 AI Agent（如 OpenClaw）的语音网关与 MCP 服务器。
 
-Mi-Voice-Agent 是小米智能家居环境的中间件。它负责捕获小爱音箱的语音输入，将其路由给外部 Agent（如 OpenClaw 或 Claude）进行处理，并根据解析后的函数调用，利用 MCP (Model Context Protocol) 协议执行实际的设备控制。
+Mi-Voice-Agent 是小米智能家居环境的中间件。它捕获小爱音箱的语音输入，将其路由给外部 Agent 处理，并通过 MCP (Model Context Protocol) 协议让 Agent 能够控制米家设备。
 
-## 典型应用场景：Agent 的现实世界语音通道
+## 典型应用场景
 
-在传统的 AI Agent 架构中，Agent 往往只能生存在命令行、网页聊天框或桌面应用中，缺乏与现实物理世界直接交互的手段。
+在传统 AI Agent 架构中，Agent 往往只能存在于命令行、网页或桌面应用中，缺乏与现实世界直接交互的能力。
 
-本项目提供了一个最典型的能力补充：**为你的 AI Agent 赋予一个真实的客厅语音入口与物理执行终端。**
-当你部署了这个网关后，你家中的小爱音箱就不再是一个独立的智能助手，而是变成了一个“带麦克风和喇叭的物理终端”。这意味着无论你在哪里部署了多么复杂的 LLM Agent（比如用来总结新闻、查日程、甚至写代码的 Agent），你都可以直接在客厅里通过语音呼叫它，并让它立刻控制家里的物理设备作为反馈。
-
-## 核心功能
-
-1. **大模型代理的语音网关**
-   识别并拦截小爱音箱收听到的特定指令词，将语音文本转发给指定的外部 Agent，取代小爱同学默认的回复机制。
-2. **设备状态管理与控制 (MCP Server)**
-   将局域网内的小米设备能力标准化为 MCP Tools (例如 `set_property`, `do_action`)，使得兼容 MCP 的 Agent 能够解析用户意图并转化为实际的 API 物理调用。
-3. **跨平台兼容性**
-   支持任何实现了 MCP 规范的客户端或框架，提供统一的智能家居接口，无需为不同的 Agent 平台开发定制化插件。
+本项目为 AI Agent 提供一个**真实的客厅语音入口与物理执行终端**：家中的小爱音箱变成"带麦克风和喇叭的物理终端"，让你可以直接通过语音呼叫任何 Agent，并让它实时控制家中的智能设备。
 
 ## 架构
 
 ```text
-[用户语音] --> 🔊 [小爱音箱 (物理语音通道)]
-                         │
-                    (语音拦截)
-                         │
-                  🎙️ [语音网关 (核心应用)]
-                         │
-               (通过 HTTP API 转发文本流)
-                         │
-                 🧠 [外部 LLM Agent (如 OpenClaw)]
-                         │
-             (Agent 发起 MCP Tool 调用请求执行动作)
-                         │
-                  ⚙️ [MCP Server (协议绑定层)]
-                         │
-              [MIoT / MiNA 云端接口]
-                         │
-                   🏠 [物理米家设备 (现实执行终端)]
+                    ┌─────────────────────────────────────┐
+                    │         AI Agent（如 OpenClaw）      │
+                    └──────┬─────────────────┬────────────┘
+                           │                 │
+     POST /v1/chat/        │                 │  MCP（Streamable HTTP）
+     completions           │                 │  POST /mcp
+                           │                 │
+                    ┌──────▼─────────────────▼────────────┐
+                    │       语音网关（单进程）               │
+                    │                                     │
+  🗣️ 用户 ──► 🔊 小爱音箱 │  语音通道 + MCP 服务器            │
+        ◄──── TTS  │  （共享 MIoT 会话）                  │
+                    └────────────────┬────────────────────┘
+                                    │ MIoT API
+                              ┌─────▼─────┐
+                              │  小米云    │
+                              └───────────┘
 ```
+
+**单进程，共享 MIoT 会话**，避免双重登录冲突。语音网关同时承担：
+- **语音通道** — 捕获小爱语音，转发给 Agent，逐句播放 TTS 回复（流式）或整段播放
+- **MCP 服务器** — 通过 Streamable HTTP 在 3001 端口暴露设备控制工具
 
 ## 项目结构
 
-本项目采用 Monorepo 结构，包含两个主要包：
+本项目为 pnpm Monorepo，包含两个包：
 
-*   `packages/voice-gateway/`: **网关层**。负责监听小爱输入流，映射关键词到 LLM 请求，并处理 TTS 语音反馈。
-*   `packages/mcp-server/`: **协议层**。一个独立的 MCP 服务器，负责标准化底层 MIoT/MiNA API。适用于只需要文本指令而不需要语音网关的场景（如仅通过 Claude Desktop 桌面端控制）。
+- `packages/voice-gateway/` — **语音网关**。提供：
+  - 语音通道：小爱音箱 ↔ OpenClaw（或任何 OpenAI 兼容 Agent）
+  - 内嵌 MCP 服务器：通过 Streamable HTTP 暴露设备控制工具
+  - 共享 MIoT 会话（避免双重登录）
+- `packages/mcp-server/` — **独立 MCP 服务器**。适用于只需要文本指令的客户端（如 Claude Desktop），使用 stdio 传输。**不可与 voice-gateway 同时使用同一小米账号运行**。
 
 ## 快速开始
 
 ### 前置要求
-- 一个小米账号。
-- 一台绑定该账号的小爱音箱。
+- 一个小米账号
+- 一台绑定该账号的[兼容小爱音箱](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md)
+- 一个支持 OpenAI 兼容 API 的 AI Agent（如 [OpenClaw](https://github.com/obra/openclaw)）
 
-### 环境变量说明
+### 环境变量
 
-运行该服务需要以下环境变量进行小米账号和设备的认证：
+**必填**
 
-| 变量名 | 说明 | 获取方式 |
+| 变量名 | 说明 |
+|---|---|
+| `MI_USER` | 小米账号 ID（数字） |
+| `MI_PASS` | 小米账号密码 |
+| `MI_DID` | 小爱音箱设备 ID（米家 App 中显示的名称） |
+| `OPENCLAW_URL` | Agent 网关地址（如 `http://localhost:18789`） |
+
+**可选**
+
+| 变量名 | 默认值 | 说明 |
 |---|---|---|
-| `MI_USER` | 小米账号 | 你的小米云服务账号（通常是手机号或邮箱，建议使用小米 ID 数字）。 |
-| `MI_PASS` | 小米密码 | 对应账号的管理密码。 |
-| `MI_DID` | 小爱音箱名称 | 你在米家 App 中为这台音箱设置的名称（例如："客厅的小爱音箱" 或 "小爱同学"）。网关会根据这个名称模糊匹配关联的设备。 |
+| `MI_PASS_TOKEN` | — | passToken，可替代 `MI_PASS` |
+| `OPENCLAW_TOKEN` | — | Agent 认证 token |
+| `OPENCLAW_MODEL` | `openclaw` | 请求中使用的模型名称 |
+| `OPENCLAW_AGENT_ID` | `main` | 处理语音请求的 OpenClaw Agent ID（通过 `x-openclaw-agent-id` 请求头路由） |
+| `STREAM_RESPONSE` | `true` | 启用流式 TTS。[不支持流式的音箱型号](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md)请设为 `false` |
+| `MCP_PORT` | `3001` | 内嵌 MCP 服务器端口 |
+| `TTS_SIID` / `TTS_AIID` | — | MIoT TTS 动作 ID，适用于 MiNA TTS 不可用的型号（如 L05C：`5`/`3`） |
+| `THINKING_TEXT` | `请稍候` | Agent 处理请求时播放的占位提示语 |
+| `USER_PROMPT` | — | 附加到每次请求的额外系统提示（如时区、偏好设置） |
+| `CALL_AI_KEYWORDS` | `请,你` | 触发 Agent 转发的唤醒词（逗号分隔） |
+| `MI_DEBUG` | `false` | 启用调试日志 |
+| `MI_TIMEOUT` | `5000` | 请求超时时间（毫秒） |
+| `MI_HEARTBEAT` | `1000` | 消息轮询间隔（毫秒） |
 
 ### 方式一：Docker Compose（推荐）
-
-使用容器化环境同时部署语音网关和底层的 MCP Server。
 
 ```bash
 git clone <your-repo-url>
 cd mi-voice-agent/docker
 cp .env.example .env
 
-# 配置你的小米账号信息与小爱音箱设备名 (MI_DID)
+# 配置小米账号信息和 Agent 地址
 vi .env
 
 docker compose up -d
@@ -84,34 +99,67 @@ docker compose up -d
 
 ### 方式二：Node.js (npx)
 
-直接在 Node 环境下运行完整网关服务。
-
 ```bash
-# 设置环境变量
 export MI_USER="你的小米ID"
 export MI_PASS="你的密码"
-export MI_DID="你的小爱音箱名称"
+export MI_DID="你的小爱音箱设备ID"
+export OPENCLAW_URL="http://localhost:18789"
 
-# 启动服务
 npx @mi-voice-agent/voice-gateway
 ```
 
-## Agent 集成指南
+## OpenClaw 集成指南
 
-### 对接 OpenClaw
-1. 确保 `voice-gateway` 正在运行。
-2. 在 OpenClaw 中配置一条通过 HTTP/SSE 指向本服务内置 MCP 的连接（例如：`http://<网关IP>:3001/mcp`）。
-3. 导入专用的 skill prompt 来帮助大模型精确识别设备参数：详情参考 [\`.openclaw/skills/mihome/SKILL.md\`](.openclaw/skills/mihome/SKILL.md)。
+### 1. 连接 MCP 服务器
 
-## 依赖安装
+启动 `voice-gateway` 后，在 OpenClaw Agent 配置中添加 MCP 连接：
 
-本项目底层的 MIoT/MiNA 协议交互依赖于 [MiGPT-Next](https://github.com/idootop/migpt-next)。请在运行前确保已安装该依赖：
+- **类型**：`sse`（Streamable HTTP）
+- **URL**：`http://<网关IP>:3001/mcp`
+
+### 2. 安装 mihome Skill
+
+将 [`.openclaw/skills/mihome/`](.openclaw/skills/mihome/) 复制到 OpenClaw skills 目录，让 Agent 了解如何使用 MCP 工具：
 
 ```bash
-npm install -g migpt-next
-# 或如果你在使用 pnpm
-pnpm add -w migpt-next
+cp -r .openclaw/skills/mihome ~/.openclaw/skills/
 ```
+
+完整工具说明见 [`.openclaw/skills/mihome/SKILL.md`](.openclaw/skills/mihome/SKILL.md)。
+
+### 3. 绑定指定 Agent 处理语音请求
+
+默认情况下，语音请求路由到 `main` agent。如需使用其他 Agent（如专门的 `public` agent），在 `.env` 中设置：
+
+```env
+OPENCLAW_AGENT_ID=public
+```
+
+网关会在每次请求中携带 `x-openclaw-agent-id` 请求头，OpenClaw 据此路由到指定 Agent。
+
+### MCP 工具列表
+
+| 工具 | 说明 |
+|---|---|
+| `list_devices` | 列出所有米家设备 |
+| `get_conversations` | 获取小爱近期对话记录 |
+| `get_property` | 读取 MIoT 设备属性 |
+| `set_property` | 设置 MIoT 设备属性 |
+| `do_action` | 执行 MIoT 设备动作 |
+| `run_scene` | 按顺序执行多个设备操作（场景） |
+| `speaker_tts` | 通过音箱播放 TTS 文本 |
+| `speaker_play_url` | 播放指定 URL 的音频 |
+| `speaker_get_status` | 获取音箱播放状态和音量 |
+| `speaker_set_volume` | 设置音箱音量 |
+
+## 已知限制
+
+- **音箱兼容性**：部分小爱型号不支持流式 TTS，需设置 `STREAM_RESPONSE=false`。详见[兼容列表](https://github.com/idootop/mi-gpt/blob/main/docs/compatibility.md)。
+- **独立 MCP 服务器**：`packages/mcp-server` 与 voice-gateway 使用同一小米账号时不可同时运行，否则会造成双重登录冲突。
+
+## 依赖
+
+底层 MIoT/MiNA 协议交互基于 [MiGPT-Next](https://github.com/idootop/migpt-next)。
 
 ## 开源协议
 
