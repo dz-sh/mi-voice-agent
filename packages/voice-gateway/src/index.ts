@@ -1,5 +1,6 @@
 import { MiGPT } from '@mi-gpt/next';
 import type { MiGPTConfig } from '@mi-gpt/next';
+import removeMarkdown from 'remove-markdown';
 import { startEmbeddedMcpServer } from './mcp-server.js';
 
 export interface MiHomeMCPConfig extends MiGPTConfig {
@@ -179,13 +180,15 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
 }
 
 /**
- * Normalize text for TTS by removing spaces inserted between digits and
- * Chinese characters (a common LLM typographic habit that disrupts TTS rhythm).
- * e.g. "凌晨 2 点 09 分" → "凌晨2点09分", "3 月 8 日" → "3月8日"
+ * Normalize text for TTS:
+ * 1. Strip markdown formatting (headers, bold/italic, code, links, etc.)
+ * 2. Remove spaces inserted between digits and Chinese characters
+ *    (a common LLM typographic habit that disrupts TTS rhythm).
+ *    e.g. "凌晨 2 点 09 分" → "凌晨2点09分", "3 月 8 日" → "3月8日"
  */
 function normalizeTTS(text: string): string {
   const CJK = '\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef';
-  return text
+  return removeMarkdown(text)
     .replace(new RegExp(`([${CJK}]) +(\\d)`, 'g'), '$1$2')
     .replace(new RegExp(`(\\d) +([${CJK}])`, 'g'), '$1$2');
 }
@@ -249,6 +252,15 @@ async function callOpenClawStreaming(
   ttsCommand?: [number, number],
   agentId?: string,
 ): Promise<string | undefined> {
+  // Sleep that resolves immediately when the abort signal fires.
+  // Without this, a long estimateTTSDuration sleep keeps the coroutine alive
+  // after the user has interrupted, delaying the isActive() exit check and
+  // allowing the current sentence to play to completion before the loop exits.
+  const abortableSleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (agentId) headers['x-openclaw-agent-id'] = agentId;
@@ -334,7 +346,9 @@ async function callOpenClawStreaming(
           // Wait for estimated playback duration before sending next sentence.
           // MIoT doAction returns immediately without waiting for audio to finish,
           // so a back-to-back call would interrupt the current sentence mid-play.
-          await new Promise<void>((r) => setTimeout(r, estimateTTSDuration(sentence)));
+          // abortableSleep exits immediately on abort so the loop can check
+          // isActive() and stop without waiting for the full estimated duration.
+          await abortableSleep(estimateTTSDuration(sentence));
         }
         // else: keep accumulating in sentenceBuffer until next sentence ending
       }
@@ -350,7 +364,7 @@ async function callOpenClawStreaming(
         if (isActive()) {
           console.log(`🔊 TTS (overflow): ${sentence}`);
           await speakText(sentence, ttsCommand);
-          await new Promise<void>((r) => setTimeout(r, estimateTTSDuration(sentence)));
+          await abortableSleep(estimateTTSDuration(sentence));
         }
       }
     }
@@ -380,7 +394,7 @@ async function callOpenClawStreaming(
  * Minimum: 1500ms to account for TTS engine startup latency.
  */
 function estimateTTSDuration(text: string): number {
-  const stripped = text.replace(/\*+|_+|`+/g, '').trim();
+  const stripped = removeMarkdown(text).trim();
   const cjkCount = (stripped.match(/[\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef]/g) ?? []).length;
   const asciiCount = stripped.length - cjkCount;
   return Math.max(1500, cjkCount * 260 + asciiCount * 80);
@@ -419,6 +433,8 @@ async function startFastPoller(
   // Concurrency control: abort in-progress OpenClaw request when a new query arrives
   let currentAbortController: AbortController | null = null;
   let generation = 0;
+  // cancel_tts retry interval; stored here so the abort block can clear it explicitly
+  let cancelRetryTimer: ReturnType<typeof setInterval> | null = null;
 
   // Seed lastTs from the most recent conversation entry so we don't re-fire on old messages
   const init = await mina.getConversations({ limit: 1 }).catch(() => null);
@@ -438,39 +454,62 @@ async function startFastPoller(
         if (record.time > lastTs && record.query) {
           lastTs = record.time;
           const query: string = record.query;
-          // Only intercept if the query matches a trigger keyword
+
+          // Any new voice activity is an implicit interrupt: cancel in-progress
+          // OpenClaw request and clear the speaker queue unconditionally.
+          // The speaker is a critical section — wake word alone (without a keyword
+          // match) must still stop ongoing TTS, otherwise the user has no way to
+          // interrupt a long OpenClaw response that doesn't trigger a new query.
+          if (cancelRetryTimer) {
+            clearInterval(cancelRetryTimer);
+            cancelRetryTimer = null;
+          }
+          if (currentAbortController) {
+            currentAbortController.abort();
+            currentAbortController = null;
+          }
+          generation++; // Invalidate old coroutine's isActive() immediately
+          await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
+          await mina.stop().catch(() => null);
+
+          // Only route to OpenClaw if the query matches a trigger keyword
           if (keywords.length === 0 || keywords.some((k) => query.startsWith(k))) {
             console.log(`⚡ Fast poller: intercepting keyword query "${query}"`);
 
-            // Cancel any in-progress OpenClaw request
-            if (currentAbortController) {
-              currentAbortController.abort();
-            }
-            const myGen = ++generation;
+            // generation was already incremented above to invalidate the old coroutine.
+            // The new coroutine owns the current slot — no second increment needed.
+            const myGen = generation;
             const abortController = new AbortController();
             currentAbortController = abortController;
             const isActive = () => myGen === generation;
 
-            // Cancel XiaoAi TTS and play thinking placeholder
-            await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
             await speakText(thinkingText, ttsCommand);
 
             // When using MIoT TTS (ttsCommand), our responses go through MIoT,
             // not mibrain. Retrying cancel_tts is safe: it only cancels mibrain
-            // (XiaoAi's response), not our sentences. We retry after the thinking
-            // text finishes because XiaoAi's LLM response typically starts
-            // 500ms–2s after the query is detected, after our cancel_tts has
-            // already been ignored.
+            // (XiaoAi's response), not our sentences.
+            // XiaoAi's cloud response typically arrives 300ms–2s after query
+            // detection, after our initial cancel_tts has already been ignored.
+            // We retry at 400ms intervals starting immediately to cover that window.
             if (ttsCommand) {
-              const thinkDuration = estimateTTSDuration(thinkingText);
               const capturedIsActive = isActive;
-              setTimeout(async () => {
-                for (let i = 0; i < 5 && capturedIsActive(); i++) {
-                  await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
-                  if (i < 4) await new Promise<void>((r) => setTimeout(r, 500));
+              let retryCount = 0;
+              cancelRetryTimer = setInterval(async () => {
+                if (!capturedIsActive() || retryCount++ >= 8) {
+                  clearInterval(cancelRetryTimer!);
+                  cancelRetryTimer = null;
+                  return;
                 }
-              }, thinkDuration);
+                // cancel_tts clears the mibrain queue; stop() halts audio that has
+                // already reached the mediaplayer. Both are needed because XiaoAi's
+                // cloud response may have started playing before the first cancel.
+                // Safe for ttsCommand path: our MIoT TTS uses a separate audio
+                // path from mibrain/mediaplayer, so stop() doesn't cut our sentences.
+                await mina.callUbus('mibrain', 'cancel_tts', {}).catch(() => null);
+                await mina.stop().catch(() => null);
+              }, 400);
             }
+
 
             // Fire-and-forget: call OpenClaw and play TTS response asynchronously
             // so the poller can continue detecting new messages without blocking.
