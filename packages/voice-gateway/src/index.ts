@@ -107,7 +107,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
 
   // Voice gateway always prepends a TTS-friendly system prompt.
   // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
-  const TTS_SYSTEM_PROMPT = '请用自然口语回答，不要使用任何Markdown格式（不要用#标题、**加粗、列表符号、表格等），直接用简洁连贯的中文口语表达，适合语音播报。';
+  const TTS_SYSTEM_PROMPT = '你是一台智能音箱的语音播报引擎。你的每一句话都会被直接送入语音合成系统播出——听众只能听到声音，看不到任何文字。因此你必须像播音员念稿一样输出：口语流畅、自然连贯，绝对不使用标题、列表符号、加粗、代码块等任何排版格式。需要列举时，用"首先……其次……最后……"这类口语连接词串成完整句子，而不是分行列举。';
   const systemPrompt = config.userPrompt
     ? `${TTS_SYSTEM_PROMPT}\n${config.userPrompt}`
     : TTS_SYSTEM_PROMPT;
@@ -518,8 +518,11 @@ async function startFastPoller(
                 }
                 if (Date.now() < retryStart) return;
                 const rCancel = await withTimeout(mina.callUbus('mibrain', 'cancel_tts', {}), 1500).catch((e: any) => ({ error: e?.message }));
+                if (!cancelRetryTimer) return; // stopRetrying() called while awaiting
                 const rStop = await withTimeout(mina.stop(), 1500).catch((e: any) => ({ error: e?.message }));
+                if (!cancelRetryTimer) return; // stopRetrying() called while awaiting
                 const rPause = await withTimeout(mina.pause(), 1500).catch((e: any) => ({ error: e?.message }));
+                if (!cancelRetryTimer) return; // stopRetrying() called while awaiting
                 console.log(`🔁 retry cancel=${JSON.stringify(rCancel)} stop=${JSON.stringify(rStop)} pause=${JSON.stringify(rPause)}`);
               }, 1000);
             }
@@ -542,7 +545,7 @@ async function startFastPoller(
                 try {
                   const messages = [
                     { role: 'system', content: openclaw.systemPrompt },
-                    { role: 'user', content: query },
+                    { role: 'user', content: `[语音播报模式：请用口语回答，绝对不要使用任何排版格式] ${query}` },
                   ];
                   const reply = openclaw.useStreaming
                     ? await callOpenClawStreaming(openclaw.url!, openclaw.token, openclaw.model, messages, openclaw.sessionUser, isActive, abortController.signal, ttsCommand, openclaw.agentId, stopRetrying)
