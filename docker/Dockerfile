@@ -14,6 +14,7 @@ COPY packages/ packages/
 COPY turbo.json ./
 
 RUN pnpm build
+RUN pnpm --filter @mi-voice-agent/voice-gateway test
 
 # ─── Production Stage ───────────────────────────────────────
 FROM node:20-alpine

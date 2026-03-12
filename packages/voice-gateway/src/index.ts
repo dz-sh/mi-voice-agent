@@ -1,7 +1,12 @@
 import { MiGPT } from '@mi-gpt/next';
 import type { MiGPTConfig } from '@mi-gpt/next';
-import removeMarkdown from 'remove-markdown';
 import { startEmbeddedMcpServer } from './mcp-server.js';
+import {
+  normalizeTTS,
+  estimateTTSDuration,
+  flushSentenceBuffer,
+} from './tts-utils.js';
+import { shouldCancelXiaoAi, shouldCallOpenClaw } from './interrupt-logic.js';
 
 export interface MiHomeMCPConfig extends MiGPTConfig {
   /**
@@ -123,7 +128,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
     async onMessage(engine: any, msg: any) {
       // Safety net: if onMessage is somehow called for a keyword query, prevent
       // MiGPT's built-in AI from responding (OpenClaw is handled by fast poller).
-      if (openclawUrl && callAIKeywords.some((k) => msg.text.startsWith(k))) {
+      if (openclawUrl && shouldCallOpenClaw(msg.text, callAIKeywords)) {
         return { handled: true };
       }
 
@@ -179,19 +184,6 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   });
 }
 
-/**
- * Normalize text for TTS:
- * 1. Strip markdown formatting (headers, bold/italic, code, links, etc.)
- * 2. Remove spaces inserted between digits and Chinese characters
- *    (a common LLM typographic habit that disrupts TTS rhythm).
- *    e.g. "凌晨 2 点 09 分" → "凌晨2点09分", "3 月 8 日" → "3月8日"
- */
-function normalizeTTS(text: string): string {
-  const CJK = '\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef';
-  return removeMarkdown(text)
-    .replace(new RegExp(`([${CJK}]) +(\\d)`, 'g'), '$1$2')
-    .replace(new RegExp(`(\\d) +([${CJK}])`, 'g'), '$1$2');
-}
 
 /**
  * Speak text via MIoT doAction (if ttsCommand set) or MiNA play fallback.
@@ -288,18 +280,6 @@ async function callOpenClawStreaming(
   let fullText = '';
   let fullReply = '';
 
-  // Sentence-ending punctuation. English period matched only after a letter and before
-  // whitespace to avoid splitting decimals (3.14) or abbreviations mid-word.
-  // \n included: paragraph/line breaks are natural TTS pauses for structured responses.
-  const sentenceEndings = /[。？！；?!;\n]|(?<=[a-zA-Z])\.(?=\s)/;
-  // Minimum chars before a sentence fragment is played. Short fragments are accumulated
-  // in sentenceBuffer until a later ending makes the combined text long enough.
-  // 30 prevents standalone headers / short bullet points from becoming their own TTS
-  // calls, which causes choppy speech.
-  const MIN_SENTENCE_LENGTH = 30;
-  // Maximum buffer length before forcing playback even without a sentence ending.
-  // Prevents long silences when the model outputs unpunctuated content.
-  const MAX_BUFFER_LENGTH = 80;
   // Accumulates short fragments until they form a long enough sentence to play.
   let sentenceBuffer = '';
 
@@ -329,47 +309,25 @@ async function callOpenClawStreaming(
         }
       }
 
-      // Process ALL sentence endings accumulated in fullText, not just the first.
-      // Multiple sentences may arrive in a single SSE chunk or across rapid chunks.
-      let match: RegExpMatchArray | null;
-      while ((match = fullText.match(sentenceEndings)) !== null && match.index !== undefined) {
-        const sentenceEnd = match.index + match[0].length;
-        sentenceBuffer += fullText.slice(0, sentenceEnd);
-        fullText = fullText.slice(sentenceEnd);
+      // Flush complete sentences from the accumulated buffer.
+      const flush = flushSentenceBuffer(sentenceBuffer, fullText);
+      sentenceBuffer = flush.remainingBuffer;
+      fullText = flush.remainingText;
 
-        const sentence = normalizeTTS(sentenceBuffer.trim());
-        if (sentence.length >= MIN_SENTENCE_LENGTH) {
-          sentenceBuffer = '';
-          fullReply += sentence;
-          if (!isActive()) break;
-          onFirstTTS?.();
-          onFirstTTS = undefined;
-          console.log(`🔊 TTS: ${sentence}`);
-          await speakText(sentence, ttsCommand);
-          await abortableSleep(estimateTTSDuration(sentence));
-        }
-        // else: keep accumulating in sentenceBuffer until next sentence ending
-      }
-
-      // Force playback if total accumulated content exceeds max length.
-      // Checks sentenceBuffer + fullText so long unpunctuated content doesn't
-      // silently accumulate in fullText and get sent as one huge TTS call.
-      if (sentenceBuffer.length + fullText.length >= MAX_BUFFER_LENGTH) {
-        const sentence = normalizeTTS((sentenceBuffer + fullText).trim());
-        sentenceBuffer = '';
-        fullText = '';
+      for (const sentence of flush.sentences) {
         fullReply += sentence;
-        if (isActive()) {
-          onFirstTTS?.();
-          onFirstTTS = undefined;
-          console.log(`🔊 TTS (overflow): ${sentence}`);
-          await speakText(sentence, ttsCommand);
-          await abortableSleep(estimateTTSDuration(sentence));
-        }
+        if (!isActive()) break;
+        onFirstTTS?.();
+        onFirstTTS = undefined;
+        console.log(`🔊 TTS: ${sentence}`);
+        await speakText(sentence, ttsCommand);
+        await abortableSleep(estimateTTSDuration(sentence));
       }
     }
 
     // Play any accumulated fragments + remaining unfinished text as one final TTS call.
+    // Intentionally bypasses MIN_SENTENCE_LENGTH: end-of-stream content must always be
+    // flushed regardless of length, otherwise the last sentence of a response is lost.
     const remaining = normalizeTTS((sentenceBuffer + fullText).trim());
     if (remaining && isActive()) {
       fullReply += remaining;
@@ -385,25 +343,6 @@ async function callOpenClawStreaming(
   }
 }
 
-/**
- * Estimate TTS playback duration in ms based on text length.
- *
- * MIoT doAction returns immediately without waiting for audio to finish.
- * This estimate prevents back-to-back TTS calls from interrupting each other.
- *
- * CJK characters: ~260ms each (Chinese TTS ~3.8 chars/sec, with safety margin).
- * ASCII characters: ~80ms each (English TTS is significantly faster).
- * Minimum: 1500ms to account for TTS engine startup latency.
- */
-function estimateTTSDuration(text: string): number {
-  const stripped = removeMarkdown(text).trim();
-  const cjkCount = (stripped.match(/[\u4e00-\u9fff\u3400-\u4dbf\uff00-\uffef]/g) ?? []).length;
-  // Digits and % expand significantly in Chinese TTS: "31%" → "百分之三十一" (~1.5s for 3 chars).
-  // Estimate at 400ms per numeric char rather than the 80ms ASCII baseline.
-  const numericCount = (stripped.match(/[\d%]/g) ?? []).length;
-  const asciiCount = stripped.length - cjkCount - numericCount;
-  return Math.max(1500, cjkCount * 260 + numericCount * 400 + asciiCount * 80);
-}
 
 interface OpenClawConfig {
   url: string | undefined;
@@ -464,31 +403,36 @@ async function startFastPoller(
           lastTs = record.time;
           const query: string = record.query;
 
-          // Any new voice activity is an implicit interrupt: cancel in-progress
-          // OpenClaw request and clear the speaker queue unconditionally.
-          // The speaker is a critical section — wake word alone (without a keyword
-          // match) must still stop ongoing TTS, otherwise the user has no way to
-          // interrupt a long OpenClaw response that doesn't trigger a new query.
+          // Always: clean up our own in-flight state when any new query arrives.
+          // This does NOT cancel XiaoAi — that decision is made below.
           if (cancelRetryTimer) {
             clearInterval(cancelRetryTimer);
             cancelRetryTimer = null;
           }
+          const hadActiveSession = currentAbortController !== null;
           if (currentAbortController) {
             currentAbortController.abort();
             currentAbortController = null;
           }
           generation++; // Invalidate old coroutine's isActive() immediately
-          const cancelRes = await withTimeout(mina.callUbus('mibrain', 'cancel_tts', {}), 1500).catch((e: any) => ({ error: e?.message }));
-          const stopRes = await withTimeout(mina.stop(), 1500).catch((e: any) => ({ error: e?.message }));
-          // Pause after stop: stop() clears current content but mibrain immediately re-queues
-          // the next segment. pause() keeps the mediaplayer in a locked-paused state so new
-          // content from mibrain cannot start playing until something explicitly resumes it.
-          // Our MIoT TTS (doAction) uses a separate MIIO path and is unaffected by pause state.
-          const pauseRes = await withTimeout(mina.pause(), 1500).catch((e: any) => ({ error: e?.message }));
-          console.log(`🛑 cancel_tts=${JSON.stringify(cancelRes)} stop=${JSON.stringify(stopRes)} pause=${JSON.stringify(pauseRes)} query="${query}"`);
+
+          // Cancel XiaoAi only when warranted (spec §3.1):
+          // - hadActiveSession: user is interrupting our ongoing response
+          // - keyword match: we are taking over this query
+          // Non-keyword queries with no active session are left to XiaoAi (TC-I-01).
+          if (shouldCancelXiaoAi(hadActiveSession, query, keywords)) {
+            const cancelRes = await withTimeout(mina.callUbus('mibrain', 'cancel_tts', {}), 1500).catch((e: any) => ({ error: e?.message }));
+            const stopRes = await withTimeout(mina.stop(), 1500).catch((e: any) => ({ error: e?.message }));
+            // Pause after stop: stop() clears current content but mibrain immediately re-queues
+            // the next segment. pause() keeps the mediaplayer in a locked-paused state so new
+            // content from mibrain cannot start playing until something explicitly resumes it.
+            // Our MIoT TTS (doAction) uses a separate MIIO path and is unaffected by pause state.
+            const pauseRes = await withTimeout(mina.pause(), 1500).catch((e: any) => ({ error: e?.message }));
+            console.log(`🛑 cancel_tts=${JSON.stringify(cancelRes)} stop=${JSON.stringify(stopRes)} pause=${JSON.stringify(pauseRes)} query="${query}"`);
+          }
 
           // Only route to OpenClaw if the query matches a trigger keyword
-          if (keywords.length === 0 || keywords.some((k) => query.startsWith(k))) {
+          if (shouldCallOpenClaw(query, keywords)) {
             console.log(`⚡ Fast poller: intercepting keyword query "${query}"`);
 
             // generation was already incremented above to invalidate the old coroutine.

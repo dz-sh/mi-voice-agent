@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "tsup",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run"
   },
   "bin": {
     "mi-voice-gateway": "./dist/cli.js"
@@ -33,7 +34,8 @@
     "@types/node": "^22.14.0",
     "@types/remove-markdown": "^0.3.4",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.0"
   },
   "engines": {
     "node": ">=20"
