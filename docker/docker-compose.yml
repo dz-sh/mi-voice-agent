@@ -22,7 +22,7 @@ services:
       - STREAM_RESPONSE=${STREAM_RESPONSE:-true}
       - MCP_PORT=${MCP_PORT:-3001}
       - THINKING_TEXT=${THINKING_TEXT:-}
-      - USER_PROMPT=${USER_PROMPT:-}
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-}
     ports:
       - "${MCP_PORT:-3001}:${MCP_PORT:-3001}"
 

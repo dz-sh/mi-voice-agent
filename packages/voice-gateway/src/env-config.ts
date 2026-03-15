@@ -25,7 +25,7 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
         TTS_SIID,
         TTS_AIID,
         THINKING_TEXT,
-        USER_PROMPT,
+        SYSTEM_PROMPT,
     } = process.env;
 
     // Validate required fields
@@ -74,8 +74,8 @@ export function buildConfigFromEnv(): MiHomeMCPConfig {
     // Placeholder text while OpenClaw is processing
     if (THINKING_TEXT) config.thinkingText = THINKING_TEXT;
 
-    // Additional system prompt appended to the built-in TTS prompt
-    if (USER_PROMPT) config.userPrompt = USER_PROMPT;
+    // System prompt override
+    if (SYSTEM_PROMPT) config.systemPrompt = SYSTEM_PROMPT;
 
     return config;
 }

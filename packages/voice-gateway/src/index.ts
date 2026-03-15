@@ -73,14 +73,14 @@ export interface MiHomeMCPConfig extends MiGPTConfig {
   thinkingText?: string;
 
   /**
-   * Additional system prompt appended to the built-in TTS prompt.
+   * System prompt injected into every request.
    *
-   * Use this for user-specific context, e.g. timezone, preferences, or
+   * Use this for setting the assistant persona, e.g. timezone, preferences, or
    * instructions that should always be included in every request.
    *
    * Example: "用户所在时区是北京时间（UTC+8）。"
    */
-  userPrompt?: string;
+  systemPrompt?: string;
 
 }
 
@@ -109,13 +109,7 @@ export async function startVoiceGateway(config: MiHomeMCPConfig) {
   const callAIKeywords: string[] = (config as any).callAIKeywords ?? ['请', '你'];
   // Use device DID as stable session identifier — OpenClaw manages conversation history
   const sessionUser: string = (config as any).speaker?.did ?? 'mi-voice-gateway';
-
-  // Voice gateway always prepends a TTS-friendly system prompt.
-  // Markdown, tables, and bullet lists sound unnatural when spoken aloud.
-  const TTS_SYSTEM_PROMPT = '你是一台智能音箱的语音播报引擎。你的每一句话都会被直接送入语音合成系统播出——听众只能听到声音，看不到任何文字。因此你必须像播音员念稿一样输出：口语流畅、自然连贯，绝对不使用标题、列表符号、加粗、代码块等任何排版格式。需要列举时，用"首先……其次……最后……"这类口语连接词串成完整句子，而不是分行列举。';
-  const systemPrompt = config.userPrompt
-    ? `${TTS_SYSTEM_PROMPT}\n${config.userPrompt}`
-    : TTS_SYSTEM_PROMPT;
+  const systemPrompt = config.systemPrompt || '';
 
   if (!openclawUrl) {
     console.warn('⚠️ OPENCLAW_URL not set — voice gateway will use default MiGPT-Next AI reply logic.');
@@ -489,7 +483,7 @@ async function startFastPoller(
                 try {
                   const messages = [
                     { role: 'system', content: openclaw.systemPrompt },
-                    { role: 'user', content: `[语音播报模式：请用口语回答，绝对不要使用任何排版格式] ${query}` },
+                    { role: 'user', content: `[语音播报模式：请用口语回答，绝对不要使用任何排版格式；容忍同音字错误，例如把“搜索”识别为“搜所”，根据上下文理解真实意图] ${query}` },
                   ];
                   const reply = openclaw.useStreaming
                     ? await callOpenClawStreaming(openclaw.url!, openclaw.token, openclaw.model, messages, openclaw.sessionUser, isActive, abortController.signal, ttsCommand, openclaw.agentId, stopRetrying)

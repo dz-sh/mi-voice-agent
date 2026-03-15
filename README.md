@@ -71,7 +71,7 @@ Mi-Voice-Agent turns your Xiaomi XiaoAI speaker into a voice channel for any AI 
 | `MCP_PORT` | `3001` | Embedded MCP server port |
 | `TTS_SIID` / `TTS_AIID` | — | MIoT TTS action IDs for speakers where MiNA TTS doesn't work (e.g., L05C: `5`/`3`) |
 | `THINKING_TEXT` | `请稍候` | Placeholder spoken while the agent is processing |
-| `USER_PROMPT` | — | Extra system prompt appended to every request (e.g., timezone, preferences) |
+| `SYSTEM_PROMPT` | — | Override the system prompt sent to the LLM |
 | `CALL_AI_KEYWORDS` | `请,你` | Comma-separated wake words that trigger agent forwarding |
 | `MI_DEBUG` | `false` | Enable debug logging |
 | `MI_TIMEOUT` | `5000` | Request timeout in ms |
