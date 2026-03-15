@@ -163,4 +163,4 @@ OPENCLAW_AGENT_ID=public
 
 ## 开源协议
 
-MIT License © 2026
+Apache 2.0 License © 2026

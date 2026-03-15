@@ -156,4 +156,4 @@ Built on [MiGPT-Next](https://github.com/idootop/migpt-next) for MIoT/MiNA proto
 
 ## License
 
-MIT License © 2026
+Apache 2.0 License © 2026
